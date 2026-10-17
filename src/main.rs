@@ -6,6 +6,7 @@ mod buffer;
 mod commands;
 mod fuzzy;
 mod highlight;
+mod session;
 mod view;
 
 use std::path::PathBuf;

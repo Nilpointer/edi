@@ -58,6 +58,7 @@ pub enum Cmd {
     Paste,
     CloseAll,
     About,
+    ToggleHotExit,
     /// Alt+1…9: switch to the n-th tab (0-based).
     SwitchTab(u8),
 }
@@ -121,6 +122,7 @@ pub const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::Paste, "Edit: Paste", ""),
     (Cmd::CloseAll, "File: Close All", ""),
     (Cmd::About, "Help: About edi", ""),
+    (Cmd::ToggleHotExit, "Preferences: Toggle Hot Exit", ""),
     (Cmd::SwitchTab(0), "Switch to Tab 1", "alt+1"),
     (Cmd::SwitchTab(1), "Switch to Tab 2", "alt+2"),
     (Cmd::SwitchTab(2), "Switch to Tab 3", "alt+3"),

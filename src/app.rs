@@ -7,6 +7,7 @@ use crate::buffer::Buffer;
 use crate::commands::{Cmd, KeyResult, Keymap, Stroke, COMMANDS};
 use crate::fuzzy;
 use crate::highlight::{comment_token, HlCache, Syntaxes};
+use crate::session::{self, Session, Snapshot, TabState};
 use crate::view::{self, Clip, Tab, ViewCtx, ViewState};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, RichText, Sense, TextEdit, Ui,
@@ -97,6 +98,11 @@ pub struct EdiApp {
     quit_confirmed: bool,
     pending_line: Option<usize>,
     frame: u64,
+    /// Hot exit: keep unsaved work in the session instead of prompting on quit.
+    hot_exit: bool,
+    session: Option<session::Writer>,
+    session_key: u64,
+    session_saved: Instant,
 }
 
 impl EdiApp {
@@ -124,7 +130,19 @@ impl EdiApp {
             quit_confirmed: false,
             pending_line: None,
             frame: 0,
+            hot_exit: true,
+            session: None,
+            session_key: 0,
+            session_saved: Instant::now(),
         };
+        // Automated screenshot runs must not read or clobber the real session.
+        let use_session = std::env::var_os("EDI_SCREENSHOT").is_none() || std::env::var_os("EDI_DATA_DIR").is_some();
+        if use_session {
+            if let Some(s) = session::load() {
+                app.apply_session(s);
+            }
+            app.session = Some(session::Writer::new());
+        }
         for a in args {
             let a = a.canonicalize().unwrap_or(a);
             if a.is_dir() {
@@ -138,6 +156,109 @@ impl EdiApp {
         }
         app.apply_visuals(&cc.egui_ctx);
         app
+    }
+
+    fn apply_session(&mut self, s: Session) {
+        self.font_size = s.font_size.clamp(7.0, 48.0);
+        self.show_sidebar = s.sidebar;
+        self.show_minimap = s.minimap;
+        self.hot_exit = s.hot_exit;
+        self.find.query = s.find;
+        self.find.case = s.find_case;
+        if let Some(i) = self.syn.themes.iter().position(|t| t.0 == s.theme) {
+            self.syn.theme = i;
+        }
+        if let Some(root) = s.root.filter(|r| r.is_dir()) {
+            self.set_root(root);
+        }
+        let mut active = 0;
+        for (i, t) in s.tabs.iter().enumerate() {
+            let Ok(buf) = Buffer::from_session(t.path.as_deref(), t.unsaved.as_deref(), &t.sels) else { continue };
+            if i == s.active {
+                active = self.tabs.len();
+            }
+            self.new_tab(buf);
+            let tab = self.tabs.last_mut().unwrap();
+            if self.syn.ss.find_syntax_by_name(&t.syntax).is_some() {
+                tab.hl.set_syntax(&t.syntax);
+            }
+            tab.view.scroll = Vec2::new(t.scroll[0], t.scroll[1]);
+        }
+        self.active = active.min(self.tabs.len().saturating_sub(1));
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        let mut tabs = Vec::new();
+        let mut unsaved = Vec::new();
+        let mut active = 0;
+        for (i, t) in self.tabs.iter().enumerate() {
+            let dirty = t.buf.is_dirty();
+            // Without hot exit only files on disk are remembered.
+            if t.buf.path.is_none() && (!self.hot_exit || t.buf.len() == 0) {
+                continue;
+            }
+            if i == self.active {
+                active = tabs.len();
+            }
+            tabs.push(TabState {
+                path: t.buf.path.clone(),
+                unsaved: None,
+                sels: t.buf.sels.iter().map(|s| (s.anchor, s.head)).collect(),
+                scroll: [t.view.scroll.x, t.view.scroll.y],
+                syntax: t.hl.syntax.clone(),
+            });
+            unsaved.push((self.hot_exit && dirty).then(|| t.buf.rope.clone()));
+        }
+        let session = Session {
+            tabs,
+            active,
+            root: self.root.clone(),
+            sidebar: self.show_sidebar,
+            minimap: self.show_minimap,
+            font_size: self.font_size,
+            theme: self.syn.themes[self.syn.theme].0.clone(),
+            hot_exit: self.hot_exit,
+            find: self.find.query.clone(),
+            find_case: self.find.case,
+        };
+        Snapshot { session, unsaved }
+    }
+
+    /// Cheap fingerprint of everything the session stores.
+    fn session_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for t in &self.tabs {
+            (&t.buf.path, t.buf.version, t.view.scroll.x.to_bits(), t.view.scroll.y.to_bits(), &t.hl.syntax).hash(&mut h);
+            for s in &t.buf.sels {
+                (s.anchor, s.head).hash(&mut h);
+            }
+        }
+        (self.active, &self.root, self.show_sidebar, self.show_minimap, self.hot_exit).hash(&mut h);
+        (self.font_size.to_bits(), self.syn.theme, &self.find.query, self.find.case).hash(&mut h);
+        h.finish()
+    }
+
+    /// Save the session at most every two seconds, and only after changes.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if self.session.is_none() {
+            return;
+        }
+        let key = self.session_key();
+        if key == self.session_key {
+            return;
+        }
+        let wait = std::time::Duration::from_secs(2);
+        if self.session_saved.elapsed() < wait {
+            ctx.request_repaint_after(wait - self.session_saved.elapsed());
+            return;
+        }
+        let snap = self.snapshot();
+        if let Some(w) = &self.session {
+            w.save(snap);
+        }
+        self.session_key = key;
+        self.session_saved = Instant::now();
     }
 
     fn apply_visuals(&self, ctx: &egui::Context) {
@@ -299,6 +420,10 @@ impl EdiApp {
                 }
             }
             Cmd::About => self.dialog = Some(Dialog::About),
+            Cmd::ToggleHotExit => {
+                self.hot_exit = !self.hot_exit;
+                self.set_status(if self.hot_exit { "Hot exit on" } else { "Hot exit off: unsaved files will prompt on quit" });
+            }
             Cmd::SwitchTab(n) => {
                 // Like Sublime, Alt+9 always goes to the last tab.
                 let n = if n == 8 { self.tabs.len() - 1 } else { n as usize };
@@ -1255,6 +1380,13 @@ fn expand_home(s: &str) -> PathBuf {
 }
 
 impl eframe::App for EdiApp {
+    fn on_exit(&mut self) {
+        let snap = self.snapshot();
+        if let Some(mut w) = self.session.take() {
+            w.finish(snap);
+        }
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         if self.frame < 10 {
             return;
@@ -1298,7 +1430,11 @@ impl eframe::App for EdiApp {
             if p.is_dir() { self.set_root(p) } else { self.open(&p) }
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_confirmed && self.tabs.iter().any(|t| t.buf.is_dirty()) {
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.hot_exit
+            && !self.quit_confirmed
+            && self.tabs.iter().any(|t| t.buf.is_dirty())
+        {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.dialog = Some(Dialog::Quit);
         }
@@ -1312,6 +1448,7 @@ impl eframe::App for EdiApp {
         self.overlay_ui(&ctx);
         self.dialog_ui(&ctx);
         self.update_title(&ctx);
+        self.autosave(&ctx);
 
         egui::Panel::top("menu")
             .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(4, 2)))

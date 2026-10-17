@@ -102,6 +102,32 @@ impl Buffer {
         Ok(Self::from_rope(Rope::from_str(&text), Some(path.to_path_buf())))
     }
 
+    /// Rebuild a buffer from a saved session. The file on disk (if any)
+    /// becomes the saved state; `unsaved` text, if given, is applied on top so
+    /// the buffer shows as modified. Fails if there is nothing to restore.
+    pub fn from_session(path: Option<&Path>, unsaved: Option<&str>, sels: &[(usize, usize)]) -> std::io::Result<Self> {
+        let mut b = match path {
+            Some(p) if p.is_file() => Self::open(p)?,
+            Some(p) if unsaved.is_some() => {
+                let mut b = Self::new();
+                b.path = Some(p.to_path_buf());
+                b
+            }
+            Some(p) => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, p.display().to_string())),
+            None if unsaved.is_some_and(|t| !t.is_empty()) => Self::new(),
+            None => return Err(std::io::Error::other("empty untitled buffer")),
+        };
+        if let Some(text) = unsaved {
+            b.rope = Rope::from_str(text);
+            b.mark_changed(0);
+        }
+        if !sels.is_empty() {
+            b.sels = sels.iter().map(|&(a, h)| Sel::new(a, h)).collect();
+            b.normalize();
+        }
+        Ok(b)
+    }
+
     fn from_rope(rope: Rope, path: Option<PathBuf>) -> Self {
         Buffer {
             saved_rope: rope.clone(),
@@ -1342,6 +1368,28 @@ mod tests {
         assert_eq!(b.rope.to_string(), "    a\n    b");
         b.unindent();
         assert_eq!(b.rope.to_string(), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_unsaved_over_file() {
+        let p = std::env::temp_dir().join(format!("edi-restore-{}.txt", std::process::id()));
+        std::fs::write(&p, "on disk\n").unwrap();
+        let b = Buffer::from_session(Some(&p), Some("edited\n"), &[(2, 4)]).unwrap();
+        assert_eq!(b.rope.to_string(), "edited\n");
+        assert!(b.is_dirty());
+        assert_eq!(b.sels, vec![Sel::new(2, 4)]);
+        let clean = Buffer::from_session(Some(&p), None, &[(99, 99)]).unwrap();
+        assert!(!clean.is_dirty());
+        // Out-of-range selections are clamped.
+        assert_eq!(clean.sels[0].head, clean.len());
+        std::fs::remove_file(&p).unwrap();
+        assert!(Buffer::from_session(Some(&p), None, &[]).is_err());
+        assert!(Buffer::from_session(None, Some(""), &[]).is_err());
     }
 }
 

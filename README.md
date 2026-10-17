@@ -68,7 +68,15 @@ releases of `appimagetool` and the AppImage runtime.
   whole-line copy/cut/paste with empty selections, toggle comment, duplicate,
   swap and delete lines, join, sort, case change, jump to bracket, and snapshot
   undo with typing coalescing.
-- Unsaved-changes prompts on close/quit, drag-and-drop to open.
+- **Hot exit / session restore**: quitting never asks about unsaved files.
+  Open tabs, unsaved text, selections, scroll positions, the open folder and
+  view settings come back on the next start. The session is also autosaved
+  every couple of seconds while you work, and written atomically, so unsaved
+  work survives crashes. Toggle it under *Preferences › Hot Exit*; when off,
+  quitting asks about unsaved files again. Stored in `~/.local/share/edi/`
+  (Linux), `~/Library/Application Support/edi/` (macOS) or `%APPDATA%\edi\`
+  (Windows).
+- Unsaved-changes prompt when closing a modified tab, drag-and-drop to open.
 
 ## Key bindings
 
@@ -106,6 +114,7 @@ releases of `appimagetool` and the AppImage runtime.
 | `src/fuzzy.rs` | Fuzzy scorer for Goto Anything and the palette |
 | `src/app.rs` | Window shell: tabs, side bar, overlays, find panel, dialogs |
 | `src/app/menu.rs` | Menu bar |
+| `src/session.rs` | Hot exit: session format, atomic background writer |
 | `assets/edi.svg` | App icon (PNG sizes in `assets/icons/`) |
 | `packaging/` | AppImage build script and `AppRun`, Flatpak manifest, macOS `Info.plist`, desktop entry |
 | `build.rs` | Embeds the icon into `edi.exe` on Windows |
@@ -120,7 +129,7 @@ in that mode.
 
 ## Not yet implemented
 
-Hot exit / session restore, split panes, word wrap, code folding,
+Split panes, word wrap, code folding,
 Find in Files, regex search, plugins, and settings files.
 
 ## License

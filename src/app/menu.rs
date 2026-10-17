@@ -200,6 +200,8 @@ impl EdiApp {
                 });
                 m.item(ui, "Select Color Scheme…", Cmd::SelectTheme);
                 ui.separator();
+                m.check(ui, self.hot_exit, "Hot Exit", Cmd::ToggleHotExit);
+                ui.separator();
                 ui.menu_button("Font Size", |ui| {
                     ui.set_min_width(210.0);
                     m.item(ui, "Larger", Cmd::ZoomIn);
