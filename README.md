@@ -63,7 +63,24 @@ releases of `appimagetool` and the AppImage runtime.
 - **Minimap** with click/drag navigation, **side bar** folder tree, tabs,
   status bar.
 - **Find / Replace panel** (Ctrl+F / Ctrl+H) with incremental search,
-  outlined matches, case toggle, Replace All.
+  outlined matches and Replace All. Toggles for regular expressions (Alt+R),
+  case (Alt+C) and whole word (Alt+W); regex replacements expand `$1` /
+  `${name}`, and invalid patterns show their error.
+- **Find in Files** (Ctrl+Shift+F): searches the open folder in the
+  background (respecting `.gitignore`, skipping binary files). *Where* takes
+  folders, include filters (`*.rs`), exclude filters (`-*.lock`) and
+  `<open files>` (unsaved edits count). Results open in a *Find Results* tab;
+  double-click a line or press F4 / Shift+F4 to jump between matches.
+- **Split panes**: Sublime-style groups, each with its own tabs — layouts
+  for 1–4 columns, 2–3 rows or a 2×2 grid (Alt+Shift+1/2/3/4/8/9/5). Ctrl+1–4
+  focuses a group, Ctrl+Shift+1–4 moves the current file there; right-click
+  a tab to move or close it.
+- **Word wrap** (Alt+Z or *View › Word Wrap*): wraps at word boundaries,
+  and ↑/↓/PageUp/PageDown move by screen rows.
+- **Code folding** by indentation: click the gutter arrows, Ctrl+Shift+[ /
+  Ctrl+Shift+] to fold / unfold at the caret, Ctrl+K Ctrl+1 to fold all,
+  Ctrl+K Ctrl+J to unfold all. Folded lines show a clickable `…`; folds move
+  with edits, and a caret landing inside a fold opens it.
 - Sublime-style editing: auto-pairing brackets/quotes, smart indent on Enter,
   whole-line copy/cut/paste with empty selections, toggle comment, duplicate,
   swap and delete lines, join, sort, case change, jump to bracket, and snapshot
@@ -76,6 +93,11 @@ releases of `appimagetool` and the AppImage runtime.
   quitting asks about unsaved files again. Stored in `~/.local/share/edi/`
   (Linux), `~/Library/Application Support/edi/` (macOS) or `%APPDATA%\edi\`
   (Windows).
+- **Single instance**: only one Edi runs. Opening files from the file
+  manager ("Open with"), the app menu or `edi file.txt` in a terminal hands
+  them to the running window, which opens them and comes to the front. Use
+  `edi -n` / `--new-instance` for a separate window (it doesn't touch the
+  hot-exit session).
 - Unsaved-changes prompt when closing a modified tab, drag-and-drop to open.
 
 ## Key bindings
@@ -100,7 +122,14 @@ releases of `appimagetool` and the AppImage runtime.
 | Ctrl+K Ctrl+B | Toggle side bar |
 | Ctrl+F / Ctrl+H, F3 / Shift+F3 | Find / replace, next / previous |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Font size |
-| Ctrl+PageDown / PageUp | Next / previous tab |
+| Ctrl+PageDown / PageUp | Next / previous tab (in the focused group) |
+| Ctrl+Shift+F, F4 / Shift+F4 | Find in Files, next / previous result |
+| Alt+R / Alt+C / Alt+W | Find: regex / case / whole word |
+| Alt+Z | Word wrap |
+| Ctrl+Shift+[ / Ctrl+Shift+] | Fold / unfold |
+| Ctrl+K Ctrl+1 / Ctrl+K Ctrl+J | Fold all / unfold all |
+| Alt+Shift+1/2/3/4, 8/9, 5 | Layout: single, 2–4 columns, 2–3 rows, grid |
+| Ctrl+1–4 / Ctrl+Shift+1–4 | Focus group / move file to group |
 | Alt+1 … Alt+9 | Switch to tab 1–8 / last tab |
 
 ## Layout
@@ -114,7 +143,12 @@ releases of `appimagetool` and the AppImage runtime.
 | `src/fuzzy.rs` | Fuzzy scorer for Goto Anything and the palette |
 | `src/app.rs` | Window shell: tabs, side bar, overlays, find panel, dialogs |
 | `src/app/menu.rs` | Menu bar |
+| `src/app/groups.rs` | Split panes: layouts, per-group tabs and views |
+| `src/display.rs` | Line ↔ screen-row mapping for word wrap and folding |
+| `src/search.rs` | Search options, regex compilation, replacement expansion |
+| `src/find_files.rs` | Find in Files: background search and the results buffer |
 | `src/session.rs` | Hot exit: session format, atomic background writer |
+| `src/instance.rs` | Single instance: lock file plus local socket, forwards files to the primary |
 | `assets/edi.svg` | App icon (PNG sizes in `assets/icons/`) |
 | `packaging/` | AppImage build script and `AppRun`, Flatpak manifest, macOS `Info.plist`, desktop entry |
 | `build.rs` | Embeds the icon into `edi.exe` on Windows |
@@ -129,8 +163,7 @@ in that mode.
 
 ## Not yet implemented
 
-Split panes, word wrap, code folding,
-Find in Files, regex search, plugins, and settings files.
+Replace in Files, plugins, and settings files.
 
 ## License
 

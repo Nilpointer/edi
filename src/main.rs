@@ -4,15 +4,42 @@
 mod app;
 mod buffer;
 mod commands;
+mod display;
+mod find_files;
 mod fuzzy;
 mod highlight;
+mod instance;
+mod search;
 mod session;
 mod view;
 
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
-    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let mut new_instance = false;
+    let args: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
+        .filter(|a| {
+            let flag = a == "-n" || a == "--new-instance";
+            new_instance |= flag;
+            !flag
+        })
+        .map(PathBuf::from)
+        .collect();
+
+    // Hand the files to a running Edi if there is one. Automated screenshot
+    // runs stay out of it unless they use a private EDI_DATA_DIR.
+    let isolated = std::env::var_os("EDI_SCREENSHOT").is_some() && std::env::var_os("EDI_DATA_DIR").is_none();
+    let primary = if new_instance || isolated {
+        None
+    } else {
+        match instance::start(&args) {
+            instance::Startup::Forwarded => return Ok(()),
+            instance::Startup::Primary(p) => Some(p),
+            instance::Startup::Standalone => None,
+        }
+    };
+
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/edi-256.png")).expect("valid icon");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -26,5 +53,5 @@ fn main() -> eframe::Result {
             .with_active(std::env::var_os("EDI_SCREENSHOT").is_none()),
         ..Default::default()
     };
-    eframe::run_native("edi", options, Box::new(|cc| Ok(Box::new(app::EdiApp::new(cc, args)))))
+    eframe::run_native("edi", options, Box::new(move |cc| Ok(Box::new(app::EdiApp::new(cc, args, primary, new_instance)))))
 }

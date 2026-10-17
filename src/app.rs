@@ -1,14 +1,19 @@
 //! Application shell: tabs, side bar, overlays (command palette, Goto
 //! Anything), find panel, status bar.
 
+mod groups;
 mod menu;
 
 use crate::buffer::Buffer;
+use groups::PaneLayout;
 use crate::commands::{Cmd, KeyResult, Keymap, Stroke, COMMANDS};
+use crate::find_files;
 use crate::fuzzy;
 use crate::highlight::{comment_token, HlCache, Syntaxes};
+use crate::instance::Primary;
+use crate::search::{Matcher, Search};
 use crate::session::{self, Session, Snapshot, TabState};
-use crate::view::{self, Clip, Tab, ViewCtx, ViewState};
+use crate::view::{Clip, Results, Tab, ViewState};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, RichText, Sense, TextEdit, Ui,
     Vec2, ViewportCommand,
@@ -20,6 +25,13 @@ use std::time::Instant;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const EDITOR_ID: &str = "edi-view";
+
+/// Focus id of group `g`'s editor view.
+fn editor_id(g: usize) -> egui::Id {
+    egui::Id::unique((EDITOR_ID, g))
+}
+/// Find in Files "Where" token for searching the open buffers.
+pub(crate) const OPEN_FILES: &str = "<open files>";
 
 #[derive(Clone, PartialEq)]
 enum Mode {
@@ -60,14 +72,41 @@ struct Overlay {
     just_opened: bool,
 }
 
+#[derive(Default, Clone, Copy, PartialEq)]
+enum FindMode {
+    #[default]
+    Find,
+    Replace,
+    Files,
+}
+
 #[derive(Default)]
 struct FindPanel {
     open: bool,
-    replace: bool,
-    query: String,
+    mode: FindMode,
+    search: Search,
     replacement: String,
-    case: bool,
+    /// Find in Files: folders and filters, e.g. `src, *.rs, -*.lock`.
+    where_: String,
     focus: bool,
+    compiled: Option<(Search, Result<Matcher, String>)>,
+}
+
+impl FindPanel {
+    /// The compiled search, recompiled only when the options change.
+    fn matcher(&mut self) -> Option<Matcher> {
+        if self.compiled.as_ref().is_none_or(|(s, _)| *s != self.search) {
+            self.compiled = Some((self.search.clone(), self.search.compile()));
+        }
+        self.compiled.as_ref().and_then(|(_, r)| r.as_ref().ok().cloned())
+    }
+
+    fn error(&self) -> Option<&str> {
+        match &self.compiled {
+            Some((s, Err(e))) if *s == self.search && !e.is_empty() => Some(e),
+            _ => None,
+        }
+    }
 }
 
 enum Dialog {
@@ -92,6 +131,7 @@ pub struct EdiApp {
     font_size: f32,
     show_sidebar: bool,
     show_minimap: bool,
+    word_wrap: bool,
     focus_editor: bool,
     status: Option<(String, Instant)>,
     title: String,
@@ -103,10 +143,18 @@ pub struct EdiApp {
     session: Option<session::Writer>,
     session_key: u64,
     session_saved: Instant,
+    /// Set when this is the primary instance: files sent by later launches.
+    primary: Option<Primary>,
+    layout: PaneLayout,
+    /// Active tab of each group.
+    group_active: Vec<Option<usize>>,
+    focus_group: usize,
+    /// Running Find in Files search, with the pattern and flags for the header.
+    fif: Option<(find_files::Job, Matcher, String, String)>,
 }
 
 impl EdiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<PathBuf>, primary: Option<Primary>, new_instance: bool) -> Self {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = EdiApp {
             syn: Syntaxes::load(),
@@ -124,6 +172,7 @@ impl EdiApp {
             font_size: DEFAULT_FONT_SIZE,
             show_sidebar: true,
             show_minimap: true,
+            word_wrap: false,
             focus_editor: true,
             status: None,
             title: String::new(),
@@ -134,9 +183,19 @@ impl EdiApp {
             session: None,
             session_key: 0,
             session_saved: Instant::now(),
+            primary: None,
+            fif: None,
+            layout: PaneLayout::Single,
+            group_active: vec![None],
+            focus_group: 0,
         };
         // Automated screenshot runs must not read or clobber the real session.
-        let use_session = std::env::var_os("EDI_SCREENSHOT").is_none() || std::env::var_os("EDI_DATA_DIR").is_some();
+        // A forced second instance (-n) must not fight the primary over the session.
+        let use_session = !new_instance && (std::env::var_os("EDI_SCREENSHOT").is_none() || std::env::var_os("EDI_DATA_DIR").is_some());
+        if let Some(p) = &primary {
+            let _ = p.ctx.set(cc.egui_ctx.clone());
+        }
+        app.primary = primary;
         if use_session {
             if let Some(s) = session::load() {
                 app.apply_session(s);
@@ -158,25 +217,48 @@ impl EdiApp {
         app
     }
 
+    /// Open files that later launches handed to this instance, and raise the window.
+    fn take_forwarded(&mut self, ctx: &egui::Context) {
+        let Some(p) = &self.primary else { return };
+        let requests: Vec<_> = p.requests.try_iter().collect();
+        if requests.is_empty() {
+            return;
+        }
+        for path in requests.into_iter().flat_map(|r| r.paths) {
+            let path = path.canonicalize().unwrap_or(path);
+            if path.is_dir() {
+                self.set_root(path);
+            } else {
+                self.open(&path);
+            }
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
+
     fn apply_session(&mut self, s: Session) {
         self.font_size = s.font_size.clamp(7.0, 48.0);
         self.show_sidebar = s.sidebar;
         self.show_minimap = s.minimap;
+        self.word_wrap = s.word_wrap;
         self.hot_exit = s.hot_exit;
-        self.find.query = s.find;
-        self.find.case = s.find_case;
+        self.find.search = s.search;
+        self.find.where_ = s.find_where;
         if let Some(i) = self.syn.themes.iter().position(|t| t.0 == s.theme) {
             self.syn.theme = i;
         }
         if let Some(root) = s.root.filter(|r| r.is_dir()) {
             self.set_root(root);
         }
+        self.layout = PaneLayout::from_code(s.layout);
+        self.normalize_groups();
         let mut active = 0;
         for (i, t) in s.tabs.iter().enumerate() {
             let Ok(buf) = Buffer::from_session(t.path.as_deref(), t.unsaved.as_deref(), &t.sels) else { continue };
             if i == s.active {
                 active = self.tabs.len();
             }
+            self.focus_group = t.group.min(self.layout.groups() - 1);
             self.new_tab(buf);
             let tab = self.tabs.last_mut().unwrap();
             if self.syn.ss.find_syntax_by_name(&t.syntax).is_some() {
@@ -184,7 +266,8 @@ impl EdiApp {
             }
             tab.view.scroll = Vec2::new(t.scroll[0], t.scroll[1]);
         }
-        self.active = active.min(self.tabs.len().saturating_sub(1));
+        self.normalize_groups();
+        self.activate(active.min(self.tabs.len().saturating_sub(1)));
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -192,6 +275,9 @@ impl EdiApp {
         let mut unsaved = Vec::new();
         let mut active = 0;
         for (i, t) in self.tabs.iter().enumerate() {
+            if t.results.is_some() {
+                continue;
+            }
             let dirty = t.buf.is_dirty();
             // Without hot exit only files on disk are remembered.
             if t.buf.path.is_none() && (!self.hot_exit || t.buf.len() == 0) {
@@ -206,6 +292,7 @@ impl EdiApp {
                 sels: t.buf.sels.iter().map(|s| (s.anchor, s.head)).collect(),
                 scroll: [t.view.scroll.x, t.view.scroll.y],
                 syntax: t.hl.syntax.clone(),
+                group: t.group,
             });
             unsaved.push((self.hot_exit && dirty).then(|| t.buf.rope.clone()));
         }
@@ -215,11 +302,13 @@ impl EdiApp {
             root: self.root.clone(),
             sidebar: self.show_sidebar,
             minimap: self.show_minimap,
+            word_wrap: self.word_wrap,
             font_size: self.font_size,
             theme: self.syn.themes[self.syn.theme].0.clone(),
             hot_exit: self.hot_exit,
-            find: self.find.query.clone(),
-            find_case: self.find.case,
+            layout: self.layout.code(),
+            search: self.find.search.clone(),
+            find_where: self.find.where_.clone(),
         };
         Snapshot { session, unsaved }
     }
@@ -234,8 +323,11 @@ impl EdiApp {
                 (s.anchor, s.head).hash(&mut h);
             }
         }
-        (self.active, &self.root, self.show_sidebar, self.show_minimap, self.hot_exit).hash(&mut h);
-        (self.font_size.to_bits(), self.syn.theme, &self.find.query, self.find.case).hash(&mut h);
+        (self.active, &self.root, self.show_sidebar, self.show_minimap, self.word_wrap, self.hot_exit, self.layout.code()).hash(&mut h);
+        for t in &self.tabs {
+            t.group.hash(&mut h);
+        }
+        (self.font_size.to_bits(), self.syn.theme, &self.find.search, &self.find.where_).hash(&mut h);
         h.finish()
     }
 
@@ -308,16 +400,15 @@ impl EdiApp {
     fn new_tab(&mut self, buf: Buffer) {
         let first: String = buf.line_str(0);
         let syntax = self.syn.detect(buf.path.as_deref(), &first).name.clone();
-        self.tabs.push(Tab { buf, hl: HlCache::new(&syntax), view: ViewState::default() });
-        self.active = self.tabs.len() - 1;
-        self.focus_editor = true;
+        let group = self.focus_group;
+        self.tabs.push(Tab { buf, hl: HlCache::new(&syntax), view: ViewState::default(), results: None, group });
+        self.activate(self.tabs.len() - 1);
     }
 
     fn open(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or(path.to_path_buf());
         if let Some(i) = self.tabs.iter().position(|t| t.buf.path.as_deref() == Some(&path)) {
-            self.active = i;
-            self.focus_editor = true;
+            self.activate(i);
             return;
         }
         match Buffer::open(&path) {
@@ -326,6 +417,7 @@ impl EdiApp {
                 let blank = self.tabs.len() == 1 && self.tabs[0].buf.path.is_none() && self.tabs[0].buf.len() == 0;
                 if blank {
                     self.tabs.clear();
+                    self.tab_removed(0);
                 }
                 self.new_tab(buf);
             }
@@ -345,20 +437,23 @@ impl EdiApp {
             self.dialog = Some(Dialog::CloseTab(i));
             return;
         }
+        let group = self.tabs[i].group;
         self.tabs.remove(i);
+        self.tab_removed(i);
         if self.tabs.is_empty() {
             self.new_tab(Buffer::new());
         }
-        if self.active >= self.tabs.len() || self.active > i {
-            self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
+        // Stay in the group the tab was closed from, if it still has tabs.
+        match self.group_active.get(group).copied().flatten() {
+            Some(t) if group == self.focus_group => self.activate(t),
+            _ => self.focus_editor = true,
         }
-        self.focus_editor = true;
     }
 
     fn save(&mut self, i: usize) -> bool {
         let Some(t) = self.tabs.get_mut(i) else { return false };
         if t.buf.path.is_none() {
-            self.active = i;
+            self.activate(i);
             self.open_overlay(Mode::SaveAs);
             return false;
         }
@@ -404,8 +499,11 @@ impl EdiApp {
                 }
             }
             Cmd::CloseTab => self.close_tab(self.active, false),
-            Cmd::NextTab => self.active = (self.active + 1) % self.tabs.len(),
-            Cmd::PrevTab => self.active = (self.active + self.tabs.len() - 1) % self.tabs.len(),
+            Cmd::NextTab => self.cycle_tab(true),
+            Cmd::PrevTab => self.cycle_tab(false),
+            Cmd::Layout(code) => self.set_layout(PaneLayout::from_code(code)),
+            Cmd::FocusGroup(g) => self.focus_group(g as usize),
+            Cmd::MoveToGroup(g) => self.move_to_group(self.active, g as usize),
             Cmd::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
             Cmd::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
             Cmd::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
@@ -424,30 +522,35 @@ impl EdiApp {
                 self.hot_exit = !self.hot_exit;
                 self.set_status(if self.hot_exit { "Hot exit on" } else { "Hot exit off: unsaved files will prompt on quit" });
             }
-            Cmd::SwitchTab(n) => {
-                // Like Sublime, Alt+9 always goes to the last tab.
-                let n = if n == 8 { self.tabs.len() - 1 } else { n as usize };
-                if n < self.tabs.len() {
-                    self.active = n;
-                }
-            }
+            Cmd::SwitchTab(n) => self.switch_tab(n as usize),
             Cmd::CommandPalette => self.toggle_overlay(Mode::Commands, ""),
             Cmd::GotoAnything => self.toggle_overlay(Mode::Anything, ""),
             Cmd::GotoLine => self.toggle_overlay(Mode::Anything, ":"),
             Cmd::GotoSymbol => self.toggle_overlay(Mode::Anything, "@"),
-            Cmd::Find | Cmd::Replace => {
+            Cmd::Find | Cmd::Replace | Cmd::FindInFiles => {
                 let sel = self.tab().map(|t| t.buf.sel_text(t.buf.sels.last().unwrap())).unwrap_or_default();
                 if !sel.is_empty() && !sel.contains('\n') {
-                    self.find.query = sel;
+                    self.find.search.pattern = if self.find.search.regex { regex::escape(&sel) } else { sel };
                 }
                 self.find.open = true;
-                self.find.replace = cmd == Cmd::Replace;
+                self.find.mode = match cmd {
+                    Cmd::Replace => FindMode::Replace,
+                    Cmd::FindInFiles => FindMode::Files,
+                    _ => FindMode::Find,
+                };
+                if cmd == Cmd::FindInFiles && self.find.where_.is_empty() {
+                    self.find.where_ = self.default_where();
+                }
                 self.find.focus = true;
                 reveal = false;
             }
+            Cmd::ToggleRegex => self.find.search.regex = !self.find.search.regex,
+            Cmd::ToggleCase => self.find.search.case = !self.find.search.case,
+            Cmd::ToggleWholeWord => self.find.search.whole_word = !self.find.search.whole_word,
+            Cmd::NextResult | Cmd::PrevResult => self.step_result(cmd == Cmd::NextResult),
             Cmd::FindNext | Cmd::FindPrev => self.find_step(cmd == Cmd::FindNext),
             Cmd::FindAllUnder => {
-                let (q, case) = (self.find.query.clone(), self.find.case);
+                let fallback = self.find.matcher();
                 if let Some(t) = self.tab() {
                     let s = *t.buf.sels.last().unwrap();
                     let needle = if s.is_empty() {
@@ -456,13 +559,17 @@ impl EdiApp {
                     } else {
                         t.buf.sel_text(&s)
                     };
-                    let needle = if needle.is_empty() { q } else { needle };
-                    let n = t.buf.find_all(&needle, case || s.is_empty());
-                    self.set_status(format!("{n} matches"));
+                    // Like Sublime: the word under the caret matches whole words only.
+                    let m = Search { pattern: needle, case: true, regex: false, whole_word: s.is_empty() }.compile().ok().or(fallback);
+                    if let Some(m) = m {
+                        let n = t.buf.find_all(&m);
+                        self.set_status(format!("{n} matches"));
+                    }
                 }
             }
             Cmd::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Cmd::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Cmd::ToggleWordWrap => self.word_wrap = !self.word_wrap,
             Cmd::SelectTheme => self.open_overlay(Mode::Theme { original: self.syn.theme }),
             Cmd::SetSyntax => self.open_overlay(Mode::Syntax),
             Cmd::ZoomIn => self.font_size = (self.font_size + 1.0).min(48.0),
@@ -495,6 +602,10 @@ impl EdiApp {
                     Cmd::UpperCase => b.transform_case(true),
                     Cmd::LowerCase => b.transform_case(false),
                     Cmd::GotoBracket => b.goto_matching_bracket(),
+                    Cmd::Fold => b.fold_at_carets(),
+                    Cmd::Unfold => b.unfold_at_carets(),
+                    Cmd::FoldAll => b.fold_all(),
+                    Cmd::UnfoldAll => b.unfold_all(),
                     _ => {}
                 }
             }
@@ -510,18 +621,140 @@ impl EdiApp {
     }
 
     fn find_step(&mut self, forward: bool) {
-        let (q, case) = (self.find.query.clone(), self.find.case);
-        if q.is_empty() {
+        let Some(m) = self.find.matcher() else {
             self.find.open = true;
             self.find.focus = true;
             return;
-        }
+        };
+        let pattern = self.find.search.pattern.clone();
         if let Some(t) = self.tab() {
-            let found = t.buf.find_next(&q, case, forward);
+            let found = t.buf.find_next(&m, forward);
             t.view.reveal = true;
             if !found {
-                self.set_status(format!("Unable to find {q}"));
+                self.set_status(format!("Unable to find {pattern}"));
             }
+        }
+    }
+
+    fn start_find_in_files(&mut self, m: Matcher) {
+        let w = find_files::Where::parse(&self.find.where_, self.root.as_deref());
+        let buffers = self
+            .tabs
+            .iter()
+            .filter(|t| t.results.is_none())
+            .map(|t| (t.buf.path.clone().unwrap_or_else(|| PathBuf::from(t.buf.name())), t.buf.rope.clone()))
+            .collect();
+        let s = &self.find.search;
+        let mut flags = Vec::new();
+        if s.regex {
+            flags.push("regex");
+        }
+        if s.case {
+            flags.push("case sensitive");
+        }
+        if s.whole_word {
+            flags.push("whole word");
+        }
+        let flags = if flags.is_empty() { String::new() } else { format!(" ({})", flags.join(", ")) };
+        let job = find_files::start(m.clone(), w, buffers);
+        // Replacing a running job drops (and so cancels) it.
+        self.fif = Some((job, m, s.pattern.clone(), flags));
+        self.find.open = false;
+        self.focus_editor = true;
+    }
+
+    fn poll_find_in_files(&mut self, ctx: &egui::Context) {
+        let Some((job, ..)) = &self.fif else { return };
+        let Ok(outcome) = job.rx.try_recv() else {
+            let n = job.scanned.load(std::sync::atomic::Ordering::Relaxed);
+            self.status = Some((format!("Searching… {n} files"), Instant::now()));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let (_, matcher, pattern, flags) = self.fif.take().unwrap();
+        let (text, locs) = find_files::render(&outcome, &pattern, &flags);
+        let hits: usize = outcome.files.iter().map(|f| f.hits.len()).sum();
+        let buf = Buffer::scratch("Find Results", &text);
+        let results = Results { locs, matcher, cursor: None };
+        // Reuse an existing Find Results tab, like Sublime.
+        match self.tabs.iter().position(|t| t.results.is_some()) {
+            Some(i) => {
+                self.tabs[i].buf = buf;
+                self.tabs[i].hl.set_syntax("Plain Text");
+                self.tabs[i].view = ViewState::default();
+                self.tabs[i].results = Some(results);
+                self.activate(i);
+            }
+            None => {
+                self.new_tab(buf);
+                self.tabs.last_mut().unwrap().results = Some(results);
+            }
+        }
+        self.set_status(format!("{hits} matching lines in {} files", outcome.files.len()));
+    }
+
+    /// Open the location a Find Results line points to.
+    fn open_result(&mut self, tab: usize, line: usize) -> bool {
+        let Some(loc) = self.tabs.get(tab).and_then(|t| t.results.as_ref()?.locs.get(line)?.clone()) else {
+            return false;
+        };
+        if let Some(r) = self.tabs[tab].results.as_mut() {
+            r.cursor = Some(line);
+        }
+        let find_files::Loc { path, line: l, col: c, .. } = loc;
+        if path.is_file() {
+            self.open(&path);
+        } else if let Some(i) = self.tabs.iter().position(|t| t.results.is_none() && t.buf.name() == path.to_string_lossy()) {
+            self.activate(i); // an untitled buffer
+        } else {
+            return false;
+        }
+        let rows_per_line = (self.font_size * 1.45).round();
+        if let Some(t) = self.tabs.get_mut(self.active) {
+            let p = t.buf.lc_to_pos(l, c);
+            t.buf.sels = vec![crate::buffer::Sel::caret(p)];
+            t.view.scroll.y = l.saturating_sub(10) as f32 * rows_per_line;
+            t.view.reveal = true;
+        }
+        self.focus_editor = true;
+        true
+    }
+
+    /// F4 / Shift+F4: jump to the next or previous Find Results line.
+    fn step_result(&mut self, forward: bool) {
+        let Some(ri) = self.tabs.iter().position(|t| t.results.is_some()) else {
+            self.set_status("No Find Results");
+            return;
+        };
+        let r = self.tabs[ri].results.as_ref().unwrap();
+        let is_hit = |i: usize| r.locs[i].as_ref().is_some_and(|l| l.is_match);
+        let n = r.locs.len();
+        let start = r.cursor;
+        let order: Vec<usize> = if forward {
+            let from = start.map_or(0, |c| c + 1);
+            (from..n).chain(0..from).collect()
+        } else {
+            let from = start.unwrap_or(0);
+            (0..from).rev().chain((from..n).rev()).collect()
+        };
+        match order.into_iter().find(|&i| is_hit(i)) {
+            Some(line) => {
+                if let Some(t) = self.tabs.get_mut(ri) {
+                    let p = t.buf.line_start(line);
+                    t.buf.sels = vec![crate::buffer::Sel::caret(p)];
+                    t.view.reveal = true;
+                }
+                self.open_result(ri, line);
+            }
+            None => self.set_status("No results"),
+        }
+    }
+
+    /// Default "Where" for Find in Files: the open folder, else open files.
+    fn default_where(&self) -> String {
+        match &self.root {
+            Some(r) => r.display().to_string(),
+            None => OPEN_FILES.to_string(),
         }
     }
 
@@ -723,7 +956,7 @@ impl EdiApp {
             }
             Action::Tab(i) => {
                 self.close_overlay(true);
-                self.active = i;
+                self.activate(i);
             }
             Action::Line(l) => {
                 self.close_overlay(true);
@@ -925,76 +1158,6 @@ impl EdiApp {
     // ------------------------------------------------------------------
     // Panels
 
-    fn tabs_ui(&mut self, ui: &mut Ui) {
-        const PAD_L: f32 = 12.0;
-        const GAP: f32 = 8.0;
-        const CLOSE: f32 = 20.0;
-        const PAD_R: f32 = 6.0;
-        const HEIGHT: f32 = 30.0;
-        let mut close = None;
-        let pal = self.syn.palette();
-        egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let active = i == self.active;
-                    let color = if active { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-                    let galley = ui.painter().layout_no_wrap(t.buf.name(), FontId::proportional(13.5), color);
-                    let width = PAD_L + galley.size().x + GAP + CLOSE + PAD_R;
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
-
-                    // The close button is registered after the tab so it is on
-                    // top and gets its own clicks.
-                    let close_rect = egui::Rect::from_center_size(
-                        egui::pos2(rect.right() - PAD_R - CLOSE / 2.0, rect.center().y),
-                        Vec2::splat(CLOSE),
-                    );
-                    let close_resp = ui.interact(close_rect, egui::Id::unique(("tab-close", i)), Sense::click());
-
-                    let fill = if active {
-                        pal.bg
-                    } else if resp.hovered() {
-                        ui.visuals().widgets.hovered.weak_bg_fill
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let painter = ui.painter();
-                    painter.rect_filled(rect, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
-                    painter.galley(egui::pos2(rect.left() + PAD_L, rect.center().y - galley.size().y / 2.0), galley, color);
-
-                    // Sublime shows a dot for unsaved files and an × on hover.
-                    let c = close_rect.center();
-                    if close_resp.hovered() {
-                        painter.circle_filled(c, CLOSE / 2.0, ui.visuals().widgets.hovered.bg_fill);
-                    }
-                    if t.buf.is_dirty() && !close_resp.hovered() {
-                        painter.circle_filled(c, 4.0, color);
-                    } else if active || resp.hovered() || close_resp.hovered() || t.buf.is_dirty() {
-                        let r = 4.5;
-                        let stroke = egui::Stroke::new(1.6, if close_resp.hovered() { ui.visuals().strong_text_color() } else { color });
-                        painter.line_segment([c + Vec2::new(-r, -r), c + Vec2::new(r, r)], stroke);
-                        painter.line_segment([c + Vec2::new(-r, r), c + Vec2::new(r, -r)], stroke);
-                    }
-
-                    if close_resp.clicked() || resp.middle_clicked() {
-                        close = Some(i);
-                    } else if resp.clicked() {
-                        self.active = i;
-                        self.focus_editor = true;
-                    }
-                    if close_resp.hovered() {
-                        close_resp.on_hover_text("Close");
-                    } else if let Some(p) = &t.buf.path {
-                        resp.on_hover_text(p.display().to_string());
-                    }
-                }
-            });
-        });
-        if let Some(i) = close {
-            self.close_tab(i, false);
-        }
-    }
-
     fn sidebar_ui(&mut self, ui: &mut Ui) {
         let Some(root) = self.root.clone() else {
             ui.add_space(8.0);
@@ -1011,8 +1174,7 @@ impl EdiApp {
                 }
             }
             if let Some(i) = switch {
-                self.active = i;
-                self.focus_editor = true;
+                self.activate(i);
             }
             return;
         };
@@ -1061,14 +1223,27 @@ impl EdiApp {
 
     fn find_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let mut action: Option<&str> = None;
+        let mode = self.find.mode;
+        let label_w = 64.0;
+        let buttons_w = if mode == FindMode::Files { 120.0 } else { 250.0 };
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let case_btn = ui.selectable_label(self.find.case, RichText::new("Aa").monospace()).on_hover_text("Case sensitive");
-            if case_btn.clicked() {
-                self.find.case = !self.find.case;
+            let s = &mut self.find.search;
+            for (on, text, tip) in [
+                (&mut s.regex, ".*", "Regular expression (Alt+R)"),
+                (&mut s.case, "Aa", "Case sensitive (Alt+C)"),
+                (&mut s.whole_word, "“”", "Whole word (Alt+W)"),
+            ] {
+                if ui.selectable_label(*on, RichText::new(text).monospace()).on_hover_text(tip).clicked() {
+                    *on = !*on;
+                    action = Some("incremental");
+                }
             }
-            let w = (ui.available_width() - 260.0).max(120.0);
-            let te = ui.add(TextEdit::singleline(&mut self.find.query).hint_text("Find").desired_width(w).font(FontId::monospace(13.0)));
+            ui.add_sized([label_w, 20.0], egui::Label::new("Find:"));
+            let w = (ui.available_width() - buttons_w).max(120.0);
+            let te = ui.add(
+                TextEdit::singleline(&mut self.find.search.pattern).hint_text("Find").desired_width(w).font(FontId::monospace(13.0)),
+            );
             if self.find.focus {
                 te.request_focus();
                 self.find.focus = false;
@@ -1077,30 +1252,66 @@ impl EdiApp {
                 action = Some("incremental");
             }
             if te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                action = Some(if ui.input(|i| i.modifiers.shift) { "prev" } else if ui.input(|i| i.modifiers.alt) { "all" } else { "next" });
+                action = Some(if mode == FindMode::Files {
+                    "files"
+                } else if ui.input(|i| i.modifiers.shift) {
+                    "prev"
+                } else if ui.input(|i| i.modifiers.alt) {
+                    "all"
+                } else {
+                    "next"
+                });
                 te.request_focus();
             }
             if (te.has_focus() || te.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
                 action = Some("close");
             }
-            if ui.button("Find").clicked() {
-                action = Some("next");
-            }
-            if ui.button("Find Prev").clicked() {
-                action = Some("prev");
-            }
-            if ui.button("Find All").clicked() {
-                action = Some("all");
+            if mode == FindMode::Files {
+                if ui.button("Find").clicked() {
+                    action = Some("files");
+                }
+            } else {
+                if ui.button("Find").clicked() {
+                    action = Some("next");
+                }
+                if ui.button("Find Prev").clicked() {
+                    action = Some("prev");
+                }
+                if ui.button("Find All").clicked() {
+                    action = Some("all");
+                }
             }
             if ui.button("×").clicked() {
                 action = Some("close");
             }
         });
-        if self.find.replace {
+        if mode == FindMode::Files {
             ui.horizontal(|ui| {
-                ui.add_space(30.0);
-                let w = (ui.available_width() - 260.0).max(120.0);
-                let te = ui.add(TextEdit::singleline(&mut self.find.replacement).hint_text("Replace").desired_width(w).font(FontId::monospace(13.0)));
+                ui.add_space(96.0);
+                ui.add_sized([label_w, 20.0], egui::Label::new("Where:"));
+                let w = (ui.available_width() - buttons_w).max(120.0);
+                let te = ui.add(
+                    TextEdit::singleline(&mut self.find.where_)
+                        .hint_text("Folders and filters, e.g. src, *.rs, -*.lock, <open files>")
+                        .desired_width(w)
+                        .font(FontId::monospace(13.0)),
+                );
+                if te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    action = Some("files");
+                }
+                if (te.has_focus() || te.lost_focus()) && ui.input(|i| i.key_pressed(Key::Escape)) {
+                    action = Some("close");
+                }
+            });
+        }
+        if mode == FindMode::Replace {
+            ui.horizontal(|ui| {
+                ui.add_space(96.0);
+                ui.add_sized([label_w, 20.0], egui::Label::new("Replace:"));
+                let w = (ui.available_width() - buttons_w).max(120.0);
+                let te = ui.add(
+                    TextEdit::singleline(&mut self.find.replacement).hint_text("Replace").desired_width(w).font(FontId::monospace(13.0)),
+                );
                 if te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     action = Some("replace");
                     te.request_focus();
@@ -1113,42 +1324,65 @@ impl EdiApp {
                 }
             });
         }
+        let matcher = self.find.matcher();
+        if let Some(err) = self.find.error() {
+            ui.horizontal(|ui| {
+                ui.add_space(96.0 + label_w + 8.0);
+                ui.label(RichText::new(err).small().color(ui.visuals().error_fg_color));
+            });
+        }
         ui.add_space(4.0);
 
-        let (q, r, case) = (self.find.query.clone(), self.find.replacement.clone(), self.find.case);
         let Some(act) = action else { return };
+        if act == "close" {
+            self.find.open = false;
+            self.focus_editor = true;
+            return;
+        }
+        if act == "files" {
+            match matcher {
+                Some(m) => self.start_find_in_files(m),
+                None => self.set_status("Enter a valid search"),
+            }
+            return;
+        }
+        if mode == FindMode::Files {
+            return;
+        }
+        let Some(m) = matcher else { return };
+        let r = self.find.replacement.clone();
         let Some(t) = self.tabs.get_mut(self.active) else { return };
+        let mut status = None;
         match act {
             "incremental" => {
                 let start = t.buf.sels.last().unwrap().start();
                 t.buf.sels = vec![crate::buffer::Sel::caret(start)];
-                t.buf.find_next(&q, case, true);
+                t.buf.find_next(&m, true);
             }
             "next" => {
-                t.buf.find_next(&q, case, true);
+                t.buf.find_next(&m, true);
             }
             "prev" => {
-                t.buf.find_next(&q, case, false);
+                t.buf.find_next(&m, false);
             }
             "all" => {
-                let n = t.buf.find_all(&q, case);
+                let n = t.buf.find_all(&m);
                 self.find.open = false;
                 self.focus_editor = true;
-                self.set_status(format!("{n} matches"));
+                status = Some(format!("{n} matches"));
             }
-            "replace" => t.buf.replace_next(&q, &r, case),
+            "replace" => t.buf.replace_next(&m, &r),
             "replace_all" => {
-                let n = t.buf.replace_all_matches(&q, &r, case);
-                self.set_status(format!("Replaced {n} occurrences"));
-            }
-            "close" => {
-                self.find.open = false;
-                self.focus_editor = true;
+                let n = t.buf.replace_all_matches(&m, &r);
+                status = Some(format!("Replaced {n} occurrences"));
             }
             _ => {}
         }
         if let Some(t) = self.tabs.get_mut(self.active) {
             t.view.reveal = true;
+        }
+        if let Some(s) = status {
+            self.set_status(s);
         }
         ctx.request_repaint();
     }
@@ -1272,11 +1506,19 @@ impl EdiApp {
     /// Route key events through the keymap; matched ones are removed so the
     /// editor view never sees them.
     fn dispatch_keys(&mut self, ctx: &egui::Context) {
-        let editor_focused = ctx.memory(|m| m.focused().is_none_or(|f| f == egui::Id::unique(EDITOR_ID)));
+        let groups = self.layout.groups();
+        let editor_focused = ctx.memory(|m| m.focused().is_none_or(|f| (0..groups).any(|g| f == editor_id(g))));
         let mut cmds = Vec::new();
         ctx.input_mut(|i| {
             i.events.retain(|ev| {
-                let Event::Key { key, pressed: true, modifiers, .. } = ev else { return true };
+                let Event::Key { key, physical_key, pressed: true, modifiers, .. } = ev else { return true };
+                // Shift+digit produces a symbol on most layouts; bindings like
+                // Alt+Shift+2 mean the digit key itself.
+                let is_digit = |k: &Key| matches!(k, Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9);
+                let key = match physical_key {
+                    Some(p) if is_digit(p) && (modifiers.ctrl || modifiers.alt || modifiers.command) => p,
+                    _ => key,
+                };
                 let stroke = Stroke::from_event(*key, *modifiers);
                 // In text fields, only bindings with ctrl/alt or function keys apply.
                 let fkey = matches!(key, Key::F1 | Key::F2 | Key::F3 | Key::F4 | Key::F9);
@@ -1333,7 +1575,7 @@ impl EdiApp {
             if let Ok(q) = std::env::var("EDI_QUERY") {
                 match &mut self.overlay {
                     Some(o) => o.query = q,
-                    None => self.find.query = q,
+                    None => self.find.search.pattern = q,
                 }
             }
         }
@@ -1412,6 +1654,8 @@ impl eframe::App for EdiApp {
         self.frame += 1;
         self.debug_hooks(&ctx);
 
+        self.take_forwarded(&ctx);
+        self.poll_find_in_files(&ctx);
         if let Some(rx) = &self.files_rx {
             if let Ok(files) = rx.try_recv() {
                 self.files = files;
@@ -1453,7 +1697,6 @@ impl eframe::App for EdiApp {
         egui::Panel::top("menu")
             .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(4, 2)))
             .show(ui, |ui| self.menu_ui(ui));
-        egui::Panel::top("tabs").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 0 })).show(ui, |ui| self.tabs_ui(ui));
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(8, 3)))
             .show(ui, |ui| self.status_ui(ui));
@@ -1465,19 +1708,13 @@ impl eframe::App for EdiApp {
         }
 
         // Escape in the editor also dismisses the find panel.
-        let editor_has_focus = ctx.memory(|m| m.focused() == Some(egui::Id::unique(EDITOR_ID)));
+        let groups = self.layout.groups();
+        let editor_has_focus = ctx.memory(|m| m.focused().is_some_and(|f| (0..groups).any(|g| f == editor_id(g))));
         if self.find.open && editor_has_focus && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.find.open = false;
         }
         let grab = self.focus_editor && self.overlay.is_none() && self.dialog.is_none() && !self.find.focus;
         self.focus_editor = false;
-        let find = (self.find.open && !self.find.query.is_empty()).then_some((self.find.query.as_str(), self.find.case));
-        let cx = ViewCtx { syn: &self.syn, font_size: self.font_size, minimap: self.show_minimap, grab_focus: grab, find };
-        let (tabs, active, clip) = (&mut self.tabs, self.active, &mut self.clip);
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            if let Some(tab) = tabs.get_mut(active) {
-                view::show(ui, tab, &cx, clip);
-            }
-        });
+        egui::CentralPanel::no_frame().show(ui, |ui| self.groups_ui(ui, grab));
     }
 }

@@ -108,6 +108,14 @@ impl EdiApp {
                     m.item_if(ui, has_sel, "Upper Case", Cmd::UpperCase);
                     m.item_if(ui, has_sel, "Lower Case", Cmd::LowerCase);
                 });
+                ui.menu_button("Code Folding", |ui| {
+                    ui.set_min_width(210.0);
+                    m.item(ui, "Fold", Cmd::Fold);
+                    m.item(ui, "Unfold", Cmd::Unfold);
+                    ui.separator();
+                    m.item(ui, "Fold All", Cmd::FoldAll);
+                    m.item(ui, "Unfold All", Cmd::UnfoldAll);
+                });
                 ui.separator();
                 m.item(ui, "Sort Lines", Cmd::SortLines);
             });
@@ -131,6 +139,14 @@ impl EdiApp {
                 ui.separator();
                 m.item(ui, "Replace…", Cmd::Replace);
                 ui.separator();
+                m.item(ui, "Find in Files…", Cmd::FindInFiles);
+                m.item(ui, "Next Result", Cmd::NextResult);
+                m.item(ui, "Previous Result", Cmd::PrevResult);
+                ui.separator();
+                m.check(ui, self.find.search.regex, "Regular Expression", Cmd::ToggleRegex);
+                m.check(ui, self.find.search.case, "Case Sensitive", Cmd::ToggleCase);
+                m.check(ui, self.find.search.whole_word, "Whole Word", Cmd::ToggleWholeWord);
+                ui.separator();
                 m.item(ui, "Quick Add Next", Cmd::FindUnderExpand);
                 m.item(ui, "Quick Find All", Cmd::FindAllUnder);
             });
@@ -139,6 +155,28 @@ impl EdiApp {
                 ui.set_min_width(210.0);
                 m.check(ui, self.show_sidebar, "Side Bar", Cmd::ToggleSidebar);
                 m.check(ui, self.show_minimap, "Minimap", Cmd::ToggleMinimap);
+                m.check(ui, self.word_wrap, "Word Wrap", Cmd::ToggleWordWrap);
+                ui.separator();
+                ui.menu_button("Layout", |ui| {
+                    ui.set_min_width(210.0);
+                    let current = self.layout.code();
+                    for (code, label) in
+                        [(0, "Single"), (1, "Columns: 2"), (2, "Columns: 3"), (3, "Columns: 4"), (4, "Rows: 2"), (5, "Rows: 3"), (6, "Grid: 4")]
+                    {
+                        m.check(ui, current == code, label, Cmd::Layout(code));
+                    }
+                });
+                ui.menu_button("Groups", |ui| {
+                    ui.set_min_width(230.0);
+                    let groups = self.layout.groups() as u8;
+                    for g in 0..groups {
+                        m.check(ui, self.focus_group == g as usize, &format!("Focus Group {}", g + 1), Cmd::FocusGroup(g));
+                    }
+                    ui.separator();
+                    for g in 0..groups {
+                        m.item_if(ui, groups > 1, &format!("Move File to Group {}", g + 1), Cmd::MoveToGroup(g));
+                    }
+                });
                 ui.separator();
                 ui.menu_button("Syntax", |ui| {
                     ui.set_min_width(210.0);
@@ -173,11 +211,12 @@ impl EdiApp {
                     m.item(ui, "Next File", Cmd::NextTab);
                     m.item(ui, "Previous File", Cmd::PrevTab);
                     ui.separator();
-                    for (i, t) in self.tabs.iter().enumerate().take(9) {
-                        let button = Button::new(checked(i == self.active, &t.buf.name()))
-                            .shortcut_text(Keymap::label(Cmd::SwitchTab(i as u8)));
+                    // Alt+N counts within the focused group.
+                    for (n, i) in self.tabs_in_group(self.focus_group).into_iter().enumerate().take(9) {
+                        let button = Button::new(checked(i == self.active, &self.tabs[i].buf.name()))
+                            .shortcut_text(Keymap::label(Cmd::SwitchTab(n as u8)));
                         if ui.add(button).clicked() {
-                            *m.pick = Some(Pick::Cmd(Cmd::SwitchTab(i as u8)));
+                            *m.pick = Some(Pick::Cmd(Cmd::SwitchTab(n as u8)));
                         }
                     }
                 });

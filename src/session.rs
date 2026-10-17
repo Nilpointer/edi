@@ -21,11 +21,14 @@ pub struct Session {
     pub root: Option<PathBuf>,
     pub sidebar: bool,
     pub minimap: bool,
+    pub word_wrap: bool,
     pub font_size: f32,
     pub theme: String,
     pub hot_exit: bool,
-    pub find: String,
-    pub find_case: bool,
+    /// Split-pane layout code (see `PaneLayout::code`).
+    pub layout: u8,
+    pub search: crate::search::Search,
+    pub find_where: String,
 }
 
 impl Default for Session {
@@ -36,11 +39,13 @@ impl Default for Session {
             root: None,
             sidebar: true,
             minimap: true,
+            word_wrap: false,
             font_size: 14.0,
             theme: String::new(),
             hot_exit: true,
-            find: String::new(),
-            find_case: false,
+            layout: 0,
+            search: Default::default(),
+            find_where: String::new(),
         }
     }
 }
@@ -55,6 +60,7 @@ pub struct TabState {
     pub sels: Vec<(usize, usize)>,
     pub scroll: [f32; 2],
     pub syntax: String,
+    pub group: usize,
 }
 
 /// A session plus the ropes of unsaved buffers. Ropes clone in O(1), so the

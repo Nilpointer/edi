@@ -4,6 +4,7 @@
 //! applied to all selections at once, which is what gives the editor its
 //! multi-cursor behaviour.
 
+use crate::search::Matcher;
 use ropey::Rope;
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,20 @@ pub struct Buffer {
     pub changed_from_line: Option<usize>,
     /// Bumped on every text change.
     pub version: u64,
+    /// Tab title for buffers without a file, e.g. "Find Results".
+    pub label: Option<String>,
+    /// Folded (hidden) regions, kept in sync with edits.
+    folds: Vec<Fold>,
+    /// Bumped whenever the set of folds changes.
+    pub fold_gen: u64,
+}
+
+/// A hidden region: from the start of its first hidden line to the end of
+/// its last one. The line above it (the header) stays visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fold {
+    start: usize,
+    end: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,7 +155,17 @@ impl Buffer {
             last_edit: None,
             changed_from_line: Some(0),
             version: 0,
+            label: None,
+            folds: Vec::new(),
+            fold_gen: 0,
         }
+    }
+
+    /// An unmodified scratch buffer with a fixed title.
+    pub fn scratch(label: &str, text: &str) -> Self {
+        let mut b = Self::from_rope(Rope::from_str(text), None);
+        b.label = Some(label.to_string());
+        b
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
@@ -167,6 +192,7 @@ impl Buffer {
     pub fn name(&self) -> String {
         match &self.path {
             Some(p) => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            None if self.label.is_some() => self.label.clone().unwrap_or_default(),
             None => {
                 let first: String = self.rope.line(0).chars().take(30).collect();
                 let first = first.trim();
@@ -301,6 +327,7 @@ impl Buffer {
         self.rope = s.rope;
         self.sels = s.sels;
         self.last_edit = None;
+        self.clear_folds();
         self.mark_changed(0);
     }
 
@@ -321,6 +348,7 @@ impl Buffer {
         }
         self.checkpoint(kind);
         edits.sort_by_key(|e| e.0);
+        self.shift_folds(&edits);
         let first_line = self.rope.char_to_line(edits[0].0);
         let mut delta: isize = 0;
         let mut new_sels = Vec::with_capacity(edits.len());
@@ -341,10 +369,203 @@ impl Buffer {
     /// Replace the rope wholesale while keeping undo; selections are given.
     fn replace_all(&mut self, text: String, sels: Vec<Sel>, first_line: usize) {
         self.checkpoint(EditKind::Other);
+        self.clear_folds();
         self.rope = Rope::from_str(&text);
         self.sels = sels;
         self.normalize();
         self.mark_changed(first_line);
+    }
+
+    // ----------------------------------------------------------------------
+    // Folding (indentation based, like Sublime's default)
+
+    fn clear_folds(&mut self) {
+        if !self.folds.is_empty() {
+            self.folds.clear();
+            self.fold_gen += 1;
+        }
+    }
+
+    /// Keep folds in place across `edits` (sorted, original coordinates):
+    /// folds after an edit shift, folds an edit touches are dropped.
+    fn shift_folds(&mut self, edits: &[(usize, usize, String, Option<usize>)]) {
+        if self.folds.is_empty() {
+            return;
+        }
+        let before = self.folds.len();
+        let mut moved = false;
+        self.folds.retain_mut(|f| {
+            let mut delta = 0isize;
+            for (s, e, text, _) in edits {
+                if *e < f.start {
+                    delta += text.chars().count() as isize - (e - s) as isize;
+                } else if *s <= f.end {
+                    return false;
+                }
+            }
+            if delta != 0 {
+                f.start = (f.start as isize + delta) as usize;
+                f.end = (f.end as isize + delta) as usize;
+                moved = true;
+            }
+            true
+        });
+        if moved || self.folds.len() != before {
+            self.fold_gen += 1;
+        }
+    }
+
+    /// Leading-whitespace width, or None for a blank line.
+    fn indent_of(&self, line: usize) -> Option<usize> {
+        let mut v = 0;
+        for c in self.rope.line(line).chars() {
+            match c {
+                ' ' => v += 1,
+                '\t' => v = (v / TAB_SIZE + 1) * TAB_SIZE,
+                '\n' | '\r' => return None,
+                _ => return Some(v),
+            }
+        }
+        None
+    }
+
+    /// Lines (first, last) that folding `line` would hide.
+    pub fn fold_range(&self, line: usize) -> Option<(usize, usize)> {
+        let ind = self.indent_of(line)?;
+        let mut last = None;
+        for l in line + 1..self.line_count() {
+            match self.indent_of(l) {
+                None => continue,
+                Some(i) if i > ind => last = Some(l),
+                _ => break,
+            }
+        }
+        last.map(|l| (line + 1, l))
+    }
+
+    /// Cheap check used for gutter markers: is the next non-blank line deeper?
+    pub fn foldable(&self, line: usize) -> bool {
+        let Some(ind) = self.indent_of(line) else { return false };
+        (line + 1..self.line_count().min(line + 200)).find_map(|l| self.indent_of(l)).is_some_and(|i| i > ind)
+    }
+
+    /// Hidden line ranges, sorted and merged.
+    pub fn folded_lines(&self) -> Vec<(usize, usize)> {
+        let mut v: Vec<(usize, usize)> =
+            self.folds.iter().map(|f| (self.rope.char_to_line(f.start), self.rope.char_to_line(f.end))).collect();
+        v.sort();
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in v {
+            match out.last_mut() {
+                Some(last) if a <= last.1 + 1 => last.1 = last.1.max(b),
+                _ => out.push((a, b)),
+            }
+        }
+        out
+    }
+
+    pub fn has_folds(&self) -> bool {
+        !self.folds.is_empty()
+    }
+
+    /// Is `line` the visible header of a fold?
+    pub fn is_folded(&self, line: usize) -> bool {
+        line + 1 < self.line_count() && {
+            let start = self.line_start(line + 1);
+            self.folds.iter().any(|f| f.start == start)
+        }
+    }
+
+    pub fn fold_line(&mut self, line: usize) -> bool {
+        let Some((a, b)) = self.fold_range(line) else { return false };
+        if self.is_folded(line) {
+            return false;
+        }
+        self.folds.push(Fold { start: self.line_start(a), end: self.line_end(b) });
+        self.fold_gen += 1;
+        true
+    }
+
+    pub fn unfold_line(&mut self, line: usize) -> bool {
+        let before = self.folds.len();
+        let (ls, le) = (self.line_start(line), self.line_end(line));
+        let header_start = if line + 1 < self.line_count() { self.line_start(line + 1) } else { usize::MAX };
+        // Unfold a fold headed by `line`, or any fold containing it.
+        self.folds.retain(|f| f.start != header_start && !(f.start <= ls && le <= f.end));
+        let changed = self.folds.len() != before;
+        if changed {
+            self.fold_gen += 1;
+        }
+        changed
+    }
+
+    pub fn toggle_fold(&mut self, line: usize) {
+        if !self.unfold_line(line) {
+            self.fold_line(line);
+        }
+    }
+
+    /// Fold the block at each caret: its own block if it heads one, else the
+    /// enclosing block.
+    pub fn fold_at_carets(&mut self) {
+        let lines: Vec<usize> = self.sels.iter().map(|s| self.rope.char_to_line(s.head)).collect();
+        for line in lines {
+            if self.fold_range(line).is_some() && !self.is_folded(line) {
+                self.fold_line(line);
+                continue;
+            }
+            let ind = self.indent_of(line).unwrap_or(0);
+            if let Some(h) = (0..line).rev().find(|&l| self.indent_of(l).is_some_and(|i| i < ind)) {
+                self.fold_line(h);
+            }
+        }
+        self.move_carets_out_of_folds();
+    }
+
+    pub fn unfold_at_carets(&mut self) {
+        let lines: Vec<usize> = self.sels.iter().map(|s| self.rope.char_to_line(s.head)).collect();
+        for line in lines {
+            self.unfold_line(line);
+        }
+    }
+
+    /// Fold every top-level block.
+    pub fn fold_all(&mut self) {
+        let min = (0..self.line_count()).filter_map(|l| self.indent_of(l)).min().unwrap_or(0);
+        for l in 0..self.line_count() {
+            if self.indent_of(l) == Some(min) {
+                self.fold_line(l);
+            }
+        }
+        self.move_carets_out_of_folds();
+    }
+
+    pub fn unfold_all(&mut self) {
+        self.clear_folds();
+    }
+
+    /// Put carets that ended up inside a fold onto its header line.
+    fn move_carets_out_of_folds(&mut self) {
+        let folds = self.folds.clone();
+        for s in &mut self.sels {
+            if let Some(f) = folds.iter().find(|f| f.start <= s.head && s.head <= f.end) {
+                *s = Sel::caret(f.start - 1);
+            }
+        }
+        self.normalize();
+    }
+
+    /// Unfold any fold that hides a caret, e.g. after find or goto.
+    pub fn reveal_carets(&mut self) {
+        if self.folds.is_empty() {
+            return;
+        }
+        let heads: Vec<usize> = self.sels.iter().map(|s| s.head).collect();
+        let before = self.folds.len();
+        self.folds.retain(|f| !heads.iter().any(|&h| f.start <= h && h <= f.end));
+        if self.folds.len() != before {
+            self.fold_gen += 1;
+        }
     }
 
     /// Sort selections and merge overlapping ones.
@@ -605,31 +826,6 @@ impl Buffer {
         });
     }
 
-    pub fn move_vertical(&mut self, lines: isize, extend: bool) {
-        let last = self.line_count() as isize - 1;
-        let new: Vec<Sel> = self
-            .sels
-            .iter()
-            .map(|s| {
-                let (line, col) = self.pos_to_lc(s.head);
-                let goal = s.goal.unwrap_or_else(|| self.visual_col(line, col));
-                let target = line as isize + lines;
-                let h = if target < 0 {
-                    0
-                } else if target > last {
-                    self.len()
-                } else {
-                    let t = target as usize;
-                    self.line_start(t) + self.col_from_visual(t, goal)
-                };
-                Sel { anchor: if extend { s.anchor } else { h }, head: h, goal: Some(goal) }
-            })
-            .collect();
-        self.sels = new;
-        self.normalize();
-        self.seal_undo();
-    }
-
     pub fn move_home(&mut self, extend: bool) {
         self.move_heads(extend, |b, s| b.smart_home(s.head));
     }
@@ -742,38 +938,23 @@ impl Buffer {
         self.normalize();
     }
 
-    pub fn find_all(&mut self, needle: &str, case: bool) -> usize {
-        let ranges = self.find_ranges(needle, case);
+    pub fn find_all(&mut self, m: &Matcher) -> usize {
+        let ranges = self.find_ranges(m);
         if !ranges.is_empty() {
             self.sels = ranges.iter().map(|&(a, b)| Sel::new(a, b)).collect();
         }
         ranges.len()
     }
 
-    /// All (start, end) char ranges matching `needle`.
-    pub fn find_ranges(&self, needle: &str, case: bool) -> Vec<(usize, usize)> {
-        if needle.is_empty() {
-            return Vec::new();
-        }
+    /// All (start, end) char ranges matching.
+    pub fn find_ranges(&self, m: &Matcher) -> Vec<(usize, usize)> {
         let hay = self.rope.to_string();
-        let (hay, needle) = if case { (hay, needle.to_string()) } else { (hay.to_lowercase(), needle.to_lowercase()) };
-        // to_lowercase can change byte lengths for some scripts; fall back to
-        // case-sensitive positions if it did.
-        if hay.len() != self.rope.len_bytes() {
-            return self.find_ranges(&needle, true);
-        }
-        let n = needle.chars().count();
-        hay.match_indices(&needle)
-            .map(|(b, _)| {
-                let a = self.rope.byte_to_char(b);
-                (a, a + n)
-            })
-            .collect()
+        m.find_iter(&hay).map(|(a, b)| (self.rope.byte_to_char(a), self.rope.byte_to_char(b))).collect()
     }
 
     /// Select the next (or previous) match relative to the primary selection.
-    pub fn find_next(&mut self, needle: &str, case: bool, forward: bool) -> bool {
-        let ranges = self.find_ranges(needle, case);
+    pub fn find_next(&mut self, m: &Matcher, forward: bool) -> bool {
+        let ranges = self.find_ranges(m);
         if ranges.is_empty() {
             return false;
         }
@@ -788,22 +969,26 @@ impl Buffer {
         true
     }
 
-    pub fn replace_next(&mut self, needle: &str, repl: &str, case: bool) {
+    /// Replace the primary selection if it is a match, then select the next one.
+    pub fn replace_next(&mut self, m: &Matcher, repl: &str) {
         let cur = *self.sels.last().unwrap();
-        let matches_cur = {
-            let t = self.sel_text(&cur);
-            if case { t == needle } else { t.to_lowercase() == needle.to_lowercase() }
-        };
-        if matches_cur && !needle.is_empty() {
-            self.apply(EditKind::Other, vec![(cur.start(), cur.end(), repl.to_string(), None)]);
+        let hay = self.rope.to_string();
+        let (sb, eb) = (self.rope.char_to_byte(cur.start()), self.rope.char_to_byte(cur.end()));
+        let is_match = m.find_iter(&hay).any(|r| r == (sb, eb));
+        if is_match {
+            let text = m.replacement(&hay, (sb, eb), repl);
+            self.apply(EditKind::Other, vec![(cur.start(), cur.end(), text, None)]);
         }
-        self.find_next(needle, case, true);
+        self.find_next(m, true);
     }
 
-    pub fn replace_all_matches(&mut self, needle: &str, repl: &str, case: bool) -> usize {
-        let ranges = self.find_ranges(needle, case);
-        let n = ranges.len();
-        let edits = ranges.into_iter().map(|(a, b)| (a, b, repl.to_string(), None)).collect();
+    pub fn replace_all_matches(&mut self, m: &Matcher, repl: &str) -> usize {
+        let hay = self.rope.to_string();
+        let edits: Vec<_> = m
+            .find_iter(&hay)
+            .map(|r| (self.rope.byte_to_char(r.0), self.rope.byte_to_char(r.1), m.replacement(&hay, r, repl), None))
+            .collect();
+        let n = edits.len();
         self.apply(EditKind::Other, edits);
         n
     }
@@ -1368,6 +1553,81 @@ mod tests {
         assert_eq!(b.rope.to_string(), "    a\n    b");
         b.unindent();
         assert_eq!(b.rope.to_string(), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn buf(text: &str) -> Buffer {
+        let mut b = Buffer::new();
+        b.rope = Rope::from_str(text);
+        b
+    }
+
+    const SRC: &str = "fn a() {\n    one;\n\n    two;\n}\nfn b() {\n    three;\n}\n";
+
+    #[test]
+    fn fold_range_by_indentation() {
+        let b = buf(SRC);
+        assert_eq!(b.fold_range(0), Some((1, 3)));
+        assert_eq!(b.fold_range(1), None);
+        assert!(b.foldable(0) && !b.foldable(1));
+    }
+
+    #[test]
+    fn folds_follow_edits_and_drop_when_touched() {
+        let mut b = buf(SRC);
+        assert!(b.fold_line(5));
+        assert_eq!(b.folded_lines(), vec![(6, 6)]);
+        // Inserting a line above shifts the fold down.
+        b.sels = vec![Sel::caret(0)];
+        b.insert("// hi\n");
+        assert_eq!(b.folded_lines(), vec![(7, 7)]);
+        assert!(b.is_folded(6));
+        // Editing inside the fold removes it.
+        let p = b.line_start(7) + 4;
+        b.apply(EditKind::Insert, vec![(p, p, "x".into(), None)]);
+        assert!(!b.has_folds());
+    }
+
+    #[test]
+    fn fold_all_and_reveal() {
+        let mut b = buf(SRC);
+        b.sels = vec![Sel::caret(b.line_start(3))]; // inside fn a's body
+        b.fold_all();
+        assert_eq!(b.folded_lines(), vec![(1, 3), (6, 6)]);
+        assert_eq!(b.rope.char_to_line(b.sels[0].head), 0, "caret moved to the header");
+        b.sels = vec![Sel::caret(b.line_start(6))];
+        b.reveal_carets();
+        assert_eq!(b.folded_lines(), vec![(1, 3)]);
+        b.unfold_all();
+        assert!(!b.has_folds());
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use crate::search::Search;
+
+    #[test]
+    fn regex_replace_all_and_next() {
+        let mut b = Buffer::new();
+        b.rope = Rope::from_str("let a = 1;\nlet bb = 22;\n");
+        let m = Search { pattern: r"let (\w+) = (\d+)".into(), regex: true, case: true, whole_word: false }.compile().unwrap();
+        assert_eq!(b.replace_all_matches(&m, "const $1: i32 = $2"), 2);
+        assert_eq!(b.rope.to_string(), "const a: i32 = 1;\nconst bb: i32 = 22;\n");
+
+        let mut b = Buffer::new();
+        b.rope = Rope::from_str("x ä x");
+        let m = Search { pattern: "x".into(), ..Default::default() }.compile().unwrap();
+        assert!(b.find_next(&m, true));
+        b.replace_next(&m, "y");
+        assert_eq!(b.rope.to_string(), "y ä x");
+        // The second match is selected next, past the multi-byte char.
+        assert_eq!(b.sels, vec![Sel::new(4, 5)]);
     }
 }
 
