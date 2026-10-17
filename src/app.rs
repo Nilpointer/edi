@@ -424,8 +424,8 @@ impl EdiApp {
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
                 let mut s = base.to_string_lossy().into_owned();
-                if !s.ends_with('/') {
-                    s.push('/');
+                if !s.ends_with(['/', std::path::MAIN_SEPARATOR]) {
+                    s.push(std::path::MAIN_SEPARATOR);
                 }
                 if mode == Mode::SaveAs {
                     if let Some(name) = self.tab().and_then(|t| t.buf.path.as_ref()?.file_name().map(|n| n.to_string_lossy().into_owned())) {
@@ -518,7 +518,7 @@ impl EdiApp {
                     .collect()
             }
             Mode::OpenFile | Mode::OpenFolder | Mode::SaveAs => {
-                let (dir, partial) = match query.rfind('/') {
+                let (dir, partial) = match query.rfind(['/', std::path::MAIN_SEPARATOR]) {
                     Some(i) => (&query[..=i], &query[i + 1..]),
                     None => ("./", query),
                 };
@@ -536,7 +536,7 @@ impl EdiApp {
                     .into_iter()
                     .map(|(i, hits)| {
                         let (n, d) = &entries[i];
-                        let label = if *d { format!("{n}/") } else { n.clone() };
+                        let label = if *d { format!("{n}{}", std::path::MAIN_SEPARATOR) } else { n.clone() };
                         mk(label, String::new(), hits, Action::Path(dir.join(n), *d))
                     })
                     .collect();
@@ -622,7 +622,7 @@ impl EdiApp {
                 }
                 Some(_) if is_dir => {
                     if let Some(o) = &mut self.overlay {
-                        o.query = format!("{}/", p.display());
+                        o.query = format!("{}{}", p.display(), std::path::MAIN_SEPARATOR);
                         o.selected = 0;
                     }
                 }

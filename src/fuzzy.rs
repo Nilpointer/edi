@@ -15,7 +15,7 @@ pub fn score(query: &str, cand: &str) -> Option<(i64, Vec<usize>)> {
     let mut qi = 0;
     let mut prev: Option<usize> = None;
     // Prefer matches in the file name part of a path.
-    let name_start = cand.rfind('/').map(|b| cand[..b + 1].chars().count()).unwrap_or(0);
+    let name_start = cand.rfind(['/', '\\']).map(|b| cand[..b + 1].chars().count()).unwrap_or(0);
 
     for (i, &c) in lower.iter().enumerate() {
         if qi == q.len() {
@@ -25,7 +25,7 @@ pub fn score(query: &str, cand: &str) -> Option<(i64, Vec<usize>)> {
             continue;
         }
         let mut s = 1;
-        let boundary = i == 0 || matches!(chars[i - 1], '/' | '_' | '-' | ' ' | '.') || (chars[i].is_uppercase() && chars[i - 1].is_lowercase());
+        let boundary = i == 0 || matches!(chars[i - 1], '/' | '\\' | '_' | '-' | ' ' | '.') || (chars[i].is_uppercase() && chars[i - 1].is_lowercase());
         if boundary {
             s += 8;
         }

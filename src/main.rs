@@ -1,3 +1,6 @@
+// No console window behind the editor on Windows.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod buffer;
 mod commands;
@@ -13,7 +16,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("edi")
-            .with_app_id("edi")
+            // Inside a Flatpak the app id must match the desktop file id.
+            .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "edi".into()))
             .with_icon(std::sync::Arc::new(icon))
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([400.0, 300.0])

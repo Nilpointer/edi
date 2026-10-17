@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Nilpointer.Edi</id>
+  <name>Edi</name>
+  <summary>A fast Sublime-style text editor</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <description>
+    <p>
+      Edi is a GPU-drawn text editor with multiple cursors, Goto Anything,
+      a command palette, a minimap and syntax highlighting for dozens of
+      languages.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.Nilpointer.Edi.desktop</launchable>
+  <url type="homepage">https://github.com/Nilpointer/edi</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-17"/>
+  </releases>
+</component>

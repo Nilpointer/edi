@@ -11,6 +11,20 @@ documented behaviour and default key bindings, no Sublime code or assets.
 cargo run --release -- [FILE|FOLDER]...
 ```
 
+## Download
+
+[Releases](https://github.com/Nilpointer/edi/releases) provide:
+
+| Platform | File | Notes |
+|---|---|---|
+| Linux | `Edi-<v>-x86_64.AppImage` | Run directly, or `--install` it (below). glibc 2.35+ |
+| Linux | `Edi-<v>-x86_64.flatpak` | `flatpak install --user Edi-<v>-x86_64.flatpak` |
+| Linux | `edi-<v>-linux-x86_64.tar.gz` | Plain binary |
+| macOS | `Edi-<v>-macos-universal.dmg` / `.zip` | Apple Silicon + Intel. Not notarized: right-click → Open the first time |
+| Windows | `edi-<v>-windows-x86_64.zip` / `.exe` | Portable, no installer. SmartScreen may warn (unsigned) |
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
+
 ## Install (AppImage)
 
 ```sh
@@ -93,7 +107,8 @@ releases of `appimagetool` and the AppImage runtime.
 | `src/app.rs` | Window shell: tabs, side bar, overlays, find panel, dialogs |
 | `src/app/menu.rs` | Menu bar |
 | `assets/edi.svg` | App icon (PNG sizes in `assets/icons/`) |
-| `packaging/` | AppImage build script, `AppRun`, desktop entry, build container |
+| `packaging/` | AppImage build script and `AppRun`, Flatpak manifest, macOS `Info.plist`, desktop entry |
+| `build.rs` | Embeds the icon into `edi.exe` on Windows |
 
 `cargo test` covers the buffer operations, keymap and fuzzy matcher.
 

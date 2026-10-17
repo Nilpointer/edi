@@ -1,0 +1,43 @@
+# Flatpak manifest. Build a bundle with:
+#   flatpak-builder --user --install-deps-from=flathub --repo=repo --force-clean \
+#       build packaging/flatpak/io.github.Nilpointer.Edi.yml
+#   flatpak build-bundle repo Edi.flatpak io.github.Nilpointer.Edi
+id: io.github.Nilpointer.Edi
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: edi
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # A text editor needs to open and save files anywhere.
+  - --filesystem=host
+modules:
+  - name: edi
+    buildsystem: simple
+    build-options:
+      # The toolchain and crates are fetched during the build, so this
+      # manifest makes standalone bundles, not Flathub submissions.
+      build-args:
+        - --share=network
+      env:
+        RUSTUP_HOME: /run/build/edi/rustup
+        CARGO_HOME: /run/build/edi/cargo
+      append-path: /run/build/edi/cargo/bin
+    build-commands:
+      - curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.96.0
+      - cargo build --release --locked
+      - install -Dm755 target/release/edi /app/bin/edi
+      - install -Dm644 packaging/edi.desktop /app/share/applications/io.github.Nilpointer.Edi.desktop
+      - desktop-file-edit --set-icon=io.github.Nilpointer.Edi --set-key=StartupWMClass --set-value=io.github.Nilpointer.Edi /app/share/applications/io.github.Nilpointer.Edi.desktop
+      - install -Dm644 packaging/flatpak/io.github.Nilpointer.Edi.metainfo.xml /app/share/metainfo/io.github.Nilpointer.Edi.metainfo.xml
+      - install -Dm644 assets/edi.svg /app/share/icons/hicolor/scalable/apps/io.github.Nilpointer.Edi.svg
+      - for s in 16 32 48 64 128 256 512; do install -Dm644 assets/icons/edi-$s.png /app/share/icons/hicolor/${s}x${s}/apps/io.github.Nilpointer.Edi.png; done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .flatpak-builder
