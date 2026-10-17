@@ -801,38 +801,65 @@ impl EdiApp {
     // Panels
 
     fn tabs_ui(&mut self, ui: &mut Ui) {
+        const PAD_L: f32 = 12.0;
+        const GAP: f32 = 8.0;
+        const CLOSE: f32 = 20.0;
+        const PAD_R: f32 = 6.0;
+        const HEIGHT: f32 = 30.0;
         let mut close = None;
+        let pal = self.syn.palette();
         egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 for (i, t) in self.tabs.iter().enumerate() {
                     let active = i == self.active;
-                    let pal = self.syn.palette();
-                    let fill = if active { pal.bg } else { Color32::TRANSPARENT };
-                    let resp = egui::Frame::new()
-                        .fill(fill)
-                        .corner_radius(CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 })
-                        .inner_margin(egui::Margin { left: 12, right: 6, top: 6, bottom: 6 })
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let color = if active { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
-                                ui.label(RichText::new(t.buf.name()).color(color));
-                                let mark = if t.buf.is_dirty() { "●" } else { "×" };
-                                if ui.add(egui::Button::new(RichText::new(mark).size(12.0)).frame(false)).clicked() {
-                                    close = Some(i);
-                                }
-                            });
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if resp.clicked() {
+                    let color = if active { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+                    let galley = ui.painter().layout_no_wrap(t.buf.name(), FontId::proportional(13.5), color);
+                    let width = PAD_L + galley.size().x + GAP + CLOSE + PAD_R;
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, HEIGHT), Sense::click());
+
+                    // The close button is registered after the tab so it is on
+                    // top and gets its own clicks.
+                    let close_rect = egui::Rect::from_center_size(
+                        egui::pos2(rect.right() - PAD_R - CLOSE / 2.0, rect.center().y),
+                        Vec2::splat(CLOSE),
+                    );
+                    let close_resp = ui.interact(close_rect, egui::Id::unique(("tab-close", i)), Sense::click());
+
+                    let fill = if active {
+                        pal.bg
+                    } else if resp.hovered() {
+                        ui.visuals().widgets.hovered.weak_bg_fill
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
+                    painter.galley(egui::pos2(rect.left() + PAD_L, rect.center().y - galley.size().y / 2.0), galley, color);
+
+                    // Sublime shows a dot for unsaved files and an × on hover.
+                    let c = close_rect.center();
+                    if close_resp.hovered() {
+                        painter.circle_filled(c, CLOSE / 2.0, ui.visuals().widgets.hovered.bg_fill);
+                    }
+                    if t.buf.is_dirty() && !close_resp.hovered() {
+                        painter.circle_filled(c, 4.0, color);
+                    } else if active || resp.hovered() || close_resp.hovered() || t.buf.is_dirty() {
+                        let r = 4.5;
+                        let stroke = egui::Stroke::new(1.6, if close_resp.hovered() { ui.visuals().strong_text_color() } else { color });
+                        painter.line_segment([c + Vec2::new(-r, -r), c + Vec2::new(r, r)], stroke);
+                        painter.line_segment([c + Vec2::new(-r, r), c + Vec2::new(r, -r)], stroke);
+                    }
+
+                    if close_resp.clicked() || resp.middle_clicked() {
+                        close = Some(i);
+                    } else if resp.clicked() {
                         self.active = i;
                         self.focus_editor = true;
                     }
-                    if resp.middle_clicked() {
-                        close = Some(i);
-                    }
-                    if let Some(p) = &t.buf.path {
+                    if close_resp.hovered() {
+                        close_resp.on_hover_text("Close");
+                    } else if let Some(p) = &t.buf.path {
                         resp.on_hover_text(p.display().to_string());
                     }
                 }
