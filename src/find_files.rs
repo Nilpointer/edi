@@ -213,8 +213,9 @@ pub struct Loc {
 }
 
 /// Render results like Sublime's "Find Results" buffer. Returns the text and,
-/// for every line of it, the location it jumps to.
-pub fn render(o: &Outcome, pattern: &str, flags: &str) -> (String, Vec<Option<Loc>>) {
+/// for every line of it, the location it jumps to. Files inside `base` (the
+/// project folder) are shown relative to it.
+pub fn render(o: &Outcome, pattern: &str, flags: &str, base: Option<&Path>) -> (String, Vec<Option<Loc>>) {
     let mut text = String::new();
     let mut locs = Vec::new();
     let mut line = |s: &str, loc: Option<Loc>, text: &mut String| {
@@ -227,7 +228,8 @@ pub fn render(o: &Outcome, pattern: &str, flags: &str) -> (String, Vec<Option<Lo
     let mut matches = 0;
     for f in &o.files {
         let header = Loc { path: f.path.clone(), line: 0, col: 0, is_match: false };
-        line(&format!("{}:", f.path.display()), Some(header), &mut text);
+        let shown = base.and_then(|b| f.path.strip_prefix(b).ok()).unwrap_or(&f.path);
+        line(&format!("{}:", shown.display()), Some(header), &mut text);
         for h in &f.hits {
             matches += h.cols.len();
             let col = h.cols.first().map_or(0, |c| c.0);
@@ -290,7 +292,8 @@ mod tests {
         let o = job.rx.recv().unwrap();
         let names: Vec<_> = o.files.iter().map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec!["a.rs"]);
-        let (text, locs) = render(&o, "needle", "");
+        let (text, locs) = render(&o, "needle", "", Some(&dir));
+        assert!(text.contains("\na.rs:\n"), "paths are shown relative to the project");
         assert!(text.contains("     1:  fn needle() {}"));
         assert_eq!(locs.iter().flatten().count(), 2); // file header + one hit
         assert_eq!(locs.iter().flatten().filter(|l| l.is_match).count(), 1);

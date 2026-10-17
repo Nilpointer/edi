@@ -725,7 +725,7 @@ impl EdiApp {
             return;
         };
         let (_, matcher, pattern, flags) = self.fif.take().unwrap();
-        let (text, locs) = find_files::render(&outcome, &pattern, &flags);
+        let (text, locs) = find_files::render(&outcome, &pattern, &flags, self.root.as_deref());
         let hits: usize = outcome.files.iter().map(|f| f.hits.len()).sum();
         let buf = Buffer::scratch("Find Results", &text);
         let results = Results { locs, matcher, cursor: None };
