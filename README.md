@@ -122,3 +122,7 @@ in that mode.
 
 Hot exit / session restore, split panes, word wrap, code folding,
 Find in Files, regex search, plugins, and settings files.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -4,6 +4,7 @@
   <name>Edi</name>
   <summary>A fast Sublime-style text editor</summary>
   <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
   <description>
     <p>
       Edi is a GPU-drawn text editor with multiple cursors, Goto Anything,

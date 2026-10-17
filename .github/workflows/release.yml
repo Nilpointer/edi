@@ -26,7 +26,7 @@ jobs:
         run: |
           V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           mkdir -p dist "edi-$V-linux-x86_64"
-          cp target/glibc2.35/release/edi README.md "edi-$V-linux-x86_64/"
+          cp target/glibc2.35/release/edi README.md LICENSE "edi-$V-linux-x86_64/"
           tar czf "dist/edi-$V-linux-x86_64.tar.gz" "edi-$V-linux-x86_64"
           cp target/appimage/Edi-*-x86_64.AppImage dist/
       - uses: actions/upload-artifact@v7
@@ -116,7 +116,7 @@ jobs:
         run: |
           $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
           New-Item -ItemType Directory -Force dist, "edi-$v-windows-x86_64" | Out-Null
-          Copy-Item target/release/edi.exe, README.md "edi-$v-windows-x86_64/"
+          Copy-Item target/release/edi.exe, README.md, LICENSE "edi-$v-windows-x86_64/"
           Compress-Archive -Path "edi-$v-windows-x86_64" -DestinationPath "dist/edi-$v-windows-x86_64.zip"
           Copy-Item target/release/edi.exe "dist/edi-$v-windows-x86_64.exe"
       - uses: actions/upload-artifact@v7
