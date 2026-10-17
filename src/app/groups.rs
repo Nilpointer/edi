@@ -168,7 +168,7 @@ impl EdiApp {
     }
 
     /// The editor area: every group's tab strip and view.
-    pub(super) fn groups_ui(&mut self, ui: &mut Ui, grab: bool) {
+    pub(super) fn groups_ui(&mut self, ui: &mut Ui, grab: bool, frame: &eframe::Frame) {
         let full = ui.available_rect_before_wrap();
         let rects = self.layout.rects(full);
         let multi = rects.len() > 1;
@@ -176,6 +176,11 @@ impl EdiApp {
         let mut actions = Vec::new();
         let mut focus = None;
         let mut jump = None;
+        // Native webviews draw over everything, so they step aside for menus,
+        // popups, the palette and dialogs.
+        let occluded = self.overlay.is_some() || self.dialog.is_some() || egui::Popup::is_any_open(ui.ctx());
+        let mut shown_browsers = Vec::new();
+        let mut page_rects = Vec::new();
 
         for (g, r) in rects.iter().copied().enumerate() {
             let inner = if multi { r.shrink(0.5) } else { r };
@@ -206,6 +211,15 @@ impl EdiApp {
                     }
                     return;
                 };
+                if self.tabs[ti].browser.is_some() {
+                    let page = self.browser_ui(ui, ti, frame, !occluded);
+                    shown_browsers.push(ti);
+                    page_rects.push(page);
+                    if g != self.focus_group && ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(inner) {
+                        focus = Some(Ok(ti));
+                    }
+                    return;
+                }
                 let results_matcher = self.tabs[ti].results.as_ref().map(|r| r.matcher.clone());
                 let find = outline.as_ref().or(results_matcher.as_ref());
                 let cx = ViewCtx {
@@ -228,7 +242,32 @@ impl EdiApp {
                 if resp.double_clicked() && tab.results.is_some() {
                     jump = Some((ti, tab.buf.rope.char_to_line(tab.buf.sels.last().unwrap().head)));
                 }
+                self.preview_icons(ui, ti, resp.rect);
             });
+        }
+
+        // Browser tabs that aren't on screen hide their webview.
+        for (i, t) in self.tabs.iter_mut().enumerate() {
+            if let Some(b) = &mut t.browser {
+                if !shown_browsers.contains(&i) {
+                    b.hide();
+                }
+            }
+        }
+        // A click anywhere else takes keyboard focus back from the page.
+        let pressed_at = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.interact_pos() } else { None });
+        if let Some(p) = pressed_at {
+            if !page_rects.iter().any(|r| r.contains(p)) {
+                for t in &self.tabs {
+                    if let Some(b) = &t.browser {
+                        b.release_focus();
+                    }
+                }
+            }
+        }
+        // Keep WebKitGTK's event loop turning while a page is on screen.
+        if self.tabs.iter().any(|t| t.browser.as_ref().is_some_and(|b| b.has_webview())) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         // Separators between groups.

@@ -3,6 +3,7 @@
 
 mod groups;
 mod menu;
+mod web;
 
 use crate::buffer::Buffer;
 use groups::PaneLayout;
@@ -146,6 +147,8 @@ pub struct EdiApp {
     /// Set when this is the primary instance: files sent by later launches.
     primary: Option<Primary>,
     layout: PaneLayout,
+    /// Preview URL per project folder, for web service projects.
+    preview_urls: HashMap<PathBuf, String>,
     /// Active tab of each group.
     group_active: Vec<Option<usize>>,
     focus_group: usize,
@@ -186,6 +189,7 @@ impl EdiApp {
             primary: None,
             fif: None,
             layout: PaneLayout::Single,
+            preview_urls: HashMap::new(),
             group_active: vec![None],
             focus_group: 0,
         };
@@ -251,9 +255,17 @@ impl EdiApp {
             self.set_root(root);
         }
         self.layout = PaneLayout::from_code(s.layout);
+        self.preview_urls = s.preview_urls;
         self.normalize_groups();
         let mut active = 0;
         for (i, t) in s.tabs.iter().enumerate() {
+            if let Some(url) = &t.browser_url {
+                if i == s.active {
+                    active = self.tabs.len();
+                }
+                self.add_browser_tab(url, t.group.min(self.layout.groups() - 1));
+                continue;
+            }
             let Ok(buf) = Buffer::from_session(t.path.as_deref(), t.unsaved.as_deref(), &t.sels) else { continue };
             if i == s.active {
                 active = self.tabs.len();
@@ -278,6 +290,14 @@ impl EdiApp {
             if t.results.is_some() {
                 continue;
             }
+            if let Some(b) = &t.browser {
+                if i == self.active {
+                    active = tabs.len();
+                }
+                tabs.push(TabState { browser_url: Some(b.url()), group: t.group, ..Default::default() });
+                unsaved.push(None);
+                continue;
+            }
             let dirty = t.buf.is_dirty();
             // Without hot exit only files on disk are remembered.
             if t.buf.path.is_none() && (!self.hot_exit || t.buf.len() == 0) {
@@ -293,6 +313,7 @@ impl EdiApp {
                 scroll: [t.view.scroll.x, t.view.scroll.y],
                 syntax: t.hl.syntax.clone(),
                 group: t.group,
+                browser_url: None,
             });
             unsaved.push((self.hot_exit && dirty).then(|| t.buf.rope.clone()));
         }
@@ -307,6 +328,7 @@ impl EdiApp {
             theme: self.syn.themes[self.syn.theme].0.clone(),
             hot_exit: self.hot_exit,
             layout: self.layout.code(),
+            preview_urls: self.preview_urls.clone(),
             search: self.find.search.clone(),
             find_where: self.find.where_.clone(),
         };
@@ -326,7 +348,13 @@ impl EdiApp {
         (self.active, &self.root, self.show_sidebar, self.show_minimap, self.word_wrap, self.hot_exit, self.layout.code()).hash(&mut h);
         for t in &self.tabs {
             t.group.hash(&mut h);
+            if let Some(b) = &t.browser {
+                b.url().hash(&mut h);
+            }
         }
+        let mut urls: Vec<_> = self.preview_urls.iter().collect();
+        urls.sort();
+        urls.hash(&mut h);
         (self.font_size.to_bits(), self.syn.theme, &self.find.search, &self.find.where_).hash(&mut h);
         h.finish()
     }
@@ -401,7 +429,7 @@ impl EdiApp {
         let first: String = buf.line_str(0);
         let syntax = self.syn.detect(buf.path.as_deref(), &first).name.clone();
         let group = self.focus_group;
-        self.tabs.push(Tab { buf, hl: HlCache::new(&syntax), view: ViewState::default(), results: None, group });
+        self.tabs.push(Tab { buf, hl: HlCache::new(&syntax), view: ViewState::default(), results: None, group, browser: None });
         self.activate(self.tabs.len() - 1);
     }
 
@@ -466,6 +494,15 @@ impl EdiApp {
                     t.hl.set_syntax(&syntax);
                 }
                 self.set_status(format!("Saved {name}"));
+                // Live reload: refresh browser tabs showing local pages.
+                for t in &self.tabs {
+                    if let Some(b) = &t.browser {
+                        let url = b.url();
+                        if url.starts_with("file://") || url.contains("://localhost") || url.contains("://127.0.0.1") {
+                            b.reload();
+                        }
+                    }
+                }
                 if let Some(root) = &self.root {
                     self.dir_cache.retain(|k, _| !k.starts_with(root) || k != root);
                 }
@@ -570,6 +607,22 @@ impl EdiApp {
             Cmd::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Cmd::ToggleMinimap => self.show_minimap = !self.show_minimap,
             Cmd::ToggleWordWrap => self.word_wrap = !self.word_wrap,
+            Cmd::PreviewInEdi => match self.preview_target(self.active) {
+                Some(url) => self.open_preview(&url),
+                None => self.open_preview(""),
+            },
+            Cmd::OpenInBrowser => {
+                let url = self.tabs.get(self.active).and_then(|t| t.browser.as_ref().map(|b| b.url()));
+                match url.or_else(|| self.preview_target(self.active)) {
+                    Some(url) => self.open_external(&url),
+                    None => self.set_status("Nothing to open: not an HTML file, and no preview URL set for this project"),
+                }
+            }
+            Cmd::NewBrowserTab => {
+                let g = self.focus_group;
+                self.add_browser_tab("", g);
+                self.activate(self.tabs.len() - 1);
+            }
             Cmd::SelectTheme => self.open_overlay(Mode::Theme { original: self.syn.theme }),
             Cmd::SetSyntax => self.open_overlay(Mode::Syntax),
             Cmd::ZoomIn => self.font_size = (self.font_size + 1.0).min(48.0),
@@ -1649,8 +1702,9 @@ impl eframe::App for EdiApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::browser::pump();
         self.frame += 1;
         self.debug_hooks(&ctx);
 
@@ -1715,6 +1769,6 @@ impl eframe::App for EdiApp {
         }
         let grab = self.focus_editor && self.overlay.is_none() && self.dialog.is_none() && !self.find.focus;
         self.focus_editor = false;
-        egui::CentralPanel::no_frame().show(ui, |ui| self.groups_ui(ui, grab));
+        egui::CentralPanel::no_frame().show(ui, |ui| self.groups_ui(ui, grab, frame));
     }
 }

@@ -98,6 +98,15 @@ releases of `appimagetool` and the AppImage runtime.
   them to the running window, which opens them and comes to the front. Use
   `edi -n` / `--new-instance` for a separate window (it doesn't touch the
   hot-exit session).
+- **In-app browser**: a browser tab with an address bar (back, forward,
+  reload, open in the system browser). Hovering an HTML/SVG file shows two
+  quick-link icons in the editor's top-right corner: 🌐 previews the file
+  (`file://…`) in a pane beside the editor, ↗ opens it in your system
+  browser. For a web service, type its address (e.g. `localhost:8080`) into
+  the address bar once; Edi remembers it for the project folder, and the
+  icons on any project file open that URL. Saving reloads previews of local
+  pages. Ctrl+Alt+P previews, Ctrl+Alt+O opens in the system browser,
+  Ctrl+Alt+N opens a new browser tab.
 - Unsaved-changes prompt when closing a modified tab, drag-and-drop to open.
 
 ## Key bindings
@@ -130,6 +139,7 @@ releases of `appimagetool` and the AppImage runtime.
 | Ctrl+K Ctrl+1 / Ctrl+K Ctrl+J | Fold all / unfold all |
 | Alt+Shift+1/2/3/4, 8/9, 5 | Layout: single, 2–4 columns, 2–3 rows, grid |
 | Ctrl+1–4 / Ctrl+Shift+1–4 | Focus group / move file to group |
+| Ctrl+Alt+P / Ctrl+Alt+O / Ctrl+Alt+N | Preview in Edi / open in system browser / new browser tab |
 | Alt+1 … Alt+9 | Switch to tab 1–8 / last tab |
 
 ## Layout
@@ -147,6 +157,7 @@ releases of `appimagetool` and the AppImage runtime.
 | `src/display.rs` | Line ↔ screen-row mapping for word wrap and folding |
 | `src/search.rs` | Search options, regex compilation, replacement expansion |
 | `src/find_files.rs` | Find in Files: background search and the results buffer |
+| `src/browser.rs`, `src/app/web.rs` | In-app browser (wry webview), previews and project URLs |
 | `src/session.rs` | Hot exit: session format, atomic background writer |
 | `src/instance.rs` | Single instance: lock file plus local socket, forwards files to the primary |
 | `assets/edi.svg` | App icon (PNG sizes in `assets/icons/`) |
@@ -160,6 +171,18 @@ For development, `EDI_RUN="Command Palette"`, `EDI_QUERY=text` and
 screenshot before exiting. `EDI_POINTER="c:25,12;m:80,170"` injects clicks
 (`c`) and pointer moves (`m`), e.g. to open menus. Keyboard input is ignored
 in that mode.
+
+## Browser requirements
+
+The browser view uses the system web engine: WebKitGTK 4.1 on Linux,
+WebView2 on Windows (built into Windows 10/11), WKWebView on macOS. The
+AppImage and tarball need `libwebkit2gtk-4.1` installed (preinstalled on
+GNOME desktops; `apt install libwebkit2gtk-4.1-0` or
+`dnf install webkit2gtk4.1`); the Flatpak gets it from the GNOME runtime.
+
+WebKitGTK can only be embedded in X11 windows, so on Linux Edi runs through
+XWayland. Set `EDI_NATIVE_WAYLAND=1` to run as a native Wayland window
+without the browser view (previews then only open in the system browser).
 
 ## Not yet implemented
 

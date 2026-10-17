@@ -3,13 +3,17 @@
 #       build packaging/flatpak/io.github.Nilpointer.Edi.yml
 #   flatpak build-bundle repo Edi.flatpak io.github.Nilpointer.Edi
 id: io.github.Nilpointer.Edi
-runtime: org.freedesktop.Platform
-runtime-version: '25.08'
-sdk: org.freedesktop.Sdk
+# The GNOME runtime ships WebKitGTK, which the in-app browser uses.
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
 command: edi
 finish-args:
+  # The embedded browser needs X11 (XWayland on Wayland desktops).
+  - --socket=x11
   - --socket=wayland
-  - --socket=fallback-x11
+  # Browse localhost services and the web.
+  - --share=network
   - --share=ipc
   - --device=dri
   # A text editor needs to open and save files anywhere.

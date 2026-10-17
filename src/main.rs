@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod browser;
 mod buffer;
 mod commands;
 mod display;
@@ -16,6 +17,16 @@ mod view;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {
+    // The in-app browser embeds WebKitGTK as a child window, which only works
+    // on X11, so on Linux both winit and GTK use X11 (XWayland on Wayland).
+    // EDI_NATIVE_WAYLAND=1 keeps native Wayland without the browser view.
+    #[cfg(target_os = "linux")]
+    let force_x11 = std::env::var_os("EDI_NATIVE_WAYLAND").is_none();
+    #[cfg(target_os = "linux")]
+    if force_x11 {
+        // SAFETY: nothing else is running yet, so no thread reads the environment.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
     let mut new_instance = false;
     let args: Vec<PathBuf> = std::env::args_os()
         .skip(1)
@@ -52,6 +63,16 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true)
             .with_active(std::env::var_os("EDI_SCREENSHOT").is_none()),
         ..Default::default()
+    };
+    #[cfg(target_os = "linux")]
+    let options = eframe::NativeOptions {
+        event_loop_builder: force_x11.then(|| -> eframe::EventLoopBuilderHook {
+            Box::new(|b| {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                b.with_x11();
+            })
+        }),
+        ..options
     };
     eframe::run_native("edi", options, Box::new(move |cc| Ok(Box::new(app::EdiApp::new(cc, args, primary, new_instance)))))
 }

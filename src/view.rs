@@ -49,6 +49,8 @@ pub struct Tab {
     pub results: Option<Results>,
     /// Editor group (split pane) the tab lives in.
     pub group: usize,
+    /// Set for a browser tab.
+    pub browser: Option<crate::browser::Browser>,
 }
 
 /// A Find Results tab: where each of its lines jumps to.

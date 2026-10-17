@@ -25,6 +25,8 @@ pub struct Session {
     pub font_size: f32,
     pub theme: String,
     pub hot_exit: bool,
+    /// Preview URL per project folder (web services).
+    pub preview_urls: std::collections::HashMap<PathBuf, String>,
     /// Split-pane layout code (see `PaneLayout::code`).
     pub layout: u8,
     pub search: crate::search::Search,
@@ -44,6 +46,7 @@ impl Default for Session {
             theme: String::new(),
             hot_exit: true,
             layout: 0,
+            preview_urls: Default::default(),
             search: Default::default(),
             find_where: String::new(),
         }
@@ -61,6 +64,8 @@ pub struct TabState {
     pub scroll: [f32; 2],
     pub syntax: String,
     pub group: usize,
+    /// Set for a browser tab.
+    pub browser_url: Option<String>,
 }
 
 /// A session plus the ropes of unsaved buffers. Ropes clone in O(1), so the
