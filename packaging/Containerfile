@@ -1,0 +1,9 @@
+# Build environment with an older glibc (Ubuntu 22.04 = glibc 2.35) so the
+# binary runs on Ubuntu 22.04, Debian 12, Fedora 36 and anything newer.
+FROM docker.io/library/ubuntu:22.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+ARG RUST_VERSION=1.96.0
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"

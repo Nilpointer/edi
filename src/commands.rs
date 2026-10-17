@@ -53,6 +53,13 @@ pub enum Cmd {
     UpperCase,
     LowerCase,
     GotoBracket,
+    Cut,
+    Copy,
+    Paste,
+    CloseAll,
+    About,
+    /// Alt+1…9: switch to the n-th tab (0-based).
+    SwitchTab(u8),
 }
 
 /// (command, palette caption, default keys). Chords are space-separated.
@@ -107,6 +114,22 @@ pub const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::UpperCase, "Edit: Convert to Upper Case", "ctrl+k ctrl+u"),
     (Cmd::LowerCase, "Edit: Convert to Lower Case", "ctrl+k ctrl+l"),
     (Cmd::GotoBracket, "Goto: Jump to Matching Bracket", "ctrl+m"),
+    // Clipboard keys are delivered by egui as Cut/Copy/Paste events, so these
+    // have no binding here; `label` still shows the usual shortcut.
+    (Cmd::Cut, "Edit: Cut", ""),
+    (Cmd::Copy, "Edit: Copy", ""),
+    (Cmd::Paste, "Edit: Paste", ""),
+    (Cmd::CloseAll, "File: Close All", ""),
+    (Cmd::About, "Help: About edi", ""),
+    (Cmd::SwitchTab(0), "Switch to Tab 1", "alt+1"),
+    (Cmd::SwitchTab(1), "Switch to Tab 2", "alt+2"),
+    (Cmd::SwitchTab(2), "Switch to Tab 3", "alt+3"),
+    (Cmd::SwitchTab(3), "Switch to Tab 4", "alt+4"),
+    (Cmd::SwitchTab(4), "Switch to Tab 5", "alt+5"),
+    (Cmd::SwitchTab(5), "Switch to Tab 6", "alt+6"),
+    (Cmd::SwitchTab(6), "Switch to Tab 7", "alt+7"),
+    (Cmd::SwitchTab(7), "Switch to Tab 8", "alt+8"),
+    (Cmd::SwitchTab(8), "Switch to Tab 9", "alt+9"),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -192,6 +215,12 @@ impl Keymap {
 
     /// Human-readable binding for the palette.
     pub fn label(cmd: Cmd) -> String {
+        match cmd {
+            Cmd::Cut => return "Ctrl+X".into(),
+            Cmd::Copy => return "Ctrl+C".into(),
+            Cmd::Paste => return "Ctrl+V".into(),
+            _ => {}
+        }
         COMMANDS
             .iter()
             .find(|(c, _, k)| *c == cmd && !k.is_empty())

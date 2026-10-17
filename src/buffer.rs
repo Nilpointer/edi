@@ -249,6 +249,14 @@ impl Buffer {
         self.last_edit = None;
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
     pub fn undo(&mut self) {
         if let Some(s) = self.undo.pop() {
             self.redo.push(Snapshot { rope: self.rope.clone(), sels: self.sels.clone() });

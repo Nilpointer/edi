@@ -1,0 +1,50 @@
+#!/bin/sh
+# Entry point of the Edi AppImage.
+#   Edi.AppImage [FILE|FOLDER]...   run the editor
+#   Edi.AppImage --install          add Edi to your user's menu and PATH
+#   Edi.AppImage --uninstall        remove what --install added
+set -e
+HERE="$(dirname "$(readlink -f "$0")")"
+
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+BIN="$HOME/.local/bin"
+
+case "$1" in
+--install)
+    if [ -z "$APPIMAGE" ]; then
+        echo "--install must be run from the AppImage file" >&2
+        exit 1
+    fi
+    mkdir -p "$BIN" "$DATA/applications" "$DATA/edi"
+    cp -f "$APPIMAGE" "$DATA/edi/Edi.AppImage"
+    chmod +x "$DATA/edi/Edi.AppImage"
+    ln -sf "$DATA/edi/Edi.AppImage" "$BIN/edi"
+    for size in 16 32 48 64 128 256 512; do
+        dir="$DATA/icons/hicolor/${size}x${size}/apps"
+        mkdir -p "$dir"
+        cp -f "$HERE/usr/share/icons/hicolor/${size}x${size}/apps/edi.png" "$dir/edi.png"
+    done
+    mkdir -p "$DATA/icons/hicolor/scalable/apps"
+    cp -f "$HERE/usr/share/icons/hicolor/scalable/apps/edi.svg" "$DATA/icons/hicolor/scalable/apps/edi.svg"
+    sed "s|^Exec=.*|Exec=$DATA/edi/Edi.AppImage %F|" "$HERE/edi.desktop" > "$DATA/applications/edi.desktop"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$DATA/applications" 2>/dev/null || true
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$DATA/icons/hicolor" 2>/dev/null || true
+    echo "Installed Edi:"
+    echo "  app menu:  $DATA/applications/edi.desktop"
+    echo "  command:   $BIN/edi"
+    case ":$PATH:" in *":$BIN:"*) ;; *) echo "  note: add $BIN to your PATH to use 'edi' in a terminal" ;; esac
+    ;;
+--uninstall)
+    rm -f "$BIN/edi" "$DATA/applications/edi.desktop"
+    rm -rf "$DATA/edi"
+    for size in 16 32 48 64 128 256 512; do
+        rm -f "$DATA/icons/hicolor/${size}x${size}/apps/edi.png"
+    done
+    rm -f "$DATA/icons/hicolor/scalable/apps/edi.svg"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$DATA/applications" 2>/dev/null || true
+    echo "Edi uninstalled."
+    ;;
+*)
+    exec "$HERE/usr/bin/edi" "$@"
+    ;;
+esac

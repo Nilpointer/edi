@@ -1,6 +1,8 @@
 //! Application shell: tabs, side bar, overlays (command palette, Goto
 //! Anything), find panel, status bar.
 
+mod menu;
+
 use crate::buffer::Buffer;
 use crate::commands::{Cmd, KeyResult, Keymap, Stroke, COMMANDS};
 use crate::fuzzy;
@@ -70,6 +72,7 @@ struct FindPanel {
 enum Dialog {
     CloseTab(usize),
     Quit,
+    About,
 }
 
 pub struct EdiApp {
@@ -283,6 +286,26 @@ impl EdiApp {
             Cmd::NextTab => self.active = (self.active + 1) % self.tabs.len(),
             Cmd::PrevTab => self.active = (self.active + self.tabs.len() - 1) % self.tabs.len(),
             Cmd::Quit => ctx.send_viewport_cmd(ViewportCommand::Close),
+            Cmd::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
+            Cmd::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
+            Cmd::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
+            Cmd::CloseAll => {
+                // Close clean tabs; stop at the first dirty one and ask.
+                for i in (0..self.tabs.len()).rev() {
+                    self.close_tab(i, false);
+                    if self.dialog.is_some() {
+                        break;
+                    }
+                }
+            }
+            Cmd::About => self.dialog = Some(Dialog::About),
+            Cmd::SwitchTab(n) => {
+                // Like Sublime, Alt+9 always goes to the last tab.
+                let n = if n == 8 { self.tabs.len() - 1 } else { n as usize };
+                if n < self.tabs.len() {
+                    self.active = n;
+                }
+            }
             Cmd::CommandPalette => self.toggle_overlay(Mode::Commands, ""),
             Cmd::GotoAnything => self.toggle_overlay(Mode::Anything, ""),
             Cmd::GotoLine => self.toggle_overlay(Mode::Anything, ":"),
@@ -431,7 +454,11 @@ impl EdiApp {
         match mode {
             Mode::Commands => {
                 let mut seen = Vec::new();
-                let cmds: Vec<_> = COMMANDS.iter().filter(|c| !seen.contains(&c.0) && { seen.push(c.0); true }).collect();
+                let cmds: Vec<_> = COMMANDS
+                    .iter()
+                    .filter(|c| !matches!(c.0, Cmd::SwitchTab(_)))
+                    .filter(|c| !seen.contains(&c.0) && { seen.push(c.0); true })
+                    .collect();
                 fuzzy::rank(query, cmds.iter().map(|c| c.1), 200)
                     .into_iter()
                     .map(|(i, hits)| mk(cmds[i].1.to_string(), Keymap::label(cmds[i].0), hits, Action::Cmd(cmds[i].0)))
@@ -1019,6 +1046,10 @@ impl EdiApp {
                 let n = self.tabs.iter().filter(|t| t.buf.is_dirty()).count();
                 ("Quit", format!("{n} file(s) have unsaved changes. Quit anyway?"))
             }
+            Dialog::About => (
+                "About edi",
+                format!("edi {}\nA Sublime-style text editor written in Rust.", env!("CARGO_PKG_VERSION")),
+            ),
         };
         let mut choice = None;
         egui::Window::new(title)
@@ -1037,6 +1068,11 @@ impl EdiApp {
                             choice = Some("discard");
                         }
                         if ui.button("Cancel").clicked() {
+                            choice = Some("cancel");
+                        }
+                    }
+                    Dialog::About => {
+                        if ui.button("OK").clicked() {
                             choice = Some("cancel");
                         }
                     }
@@ -1132,7 +1168,7 @@ impl EdiApp {
     fn debug_hooks(&mut self, ctx: &egui::Context) {
         if std::env::var_os("EDI_SCREENSHOT").is_some() {
             // Never let stray keystrokes reach an automated run.
-            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut)));
+            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_))));
         }
         if self.frame == 5 {
             if let Ok(run) = std::env::var("EDI_RUN") {
@@ -1149,7 +1185,7 @@ impl EdiApp {
                 }
             }
         }
-        if self.frame == 40 {
+        if self.frame == screenshot_frame() {
             if let Ok(path) = std::env::var("EDI_SCREENSHOT") {
                 ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| {
                     let mut out = format!("P6 {} {} 255\n", img.size[0], img.size[1]).into_bytes();
@@ -1161,10 +1197,27 @@ impl EdiApp {
                 })));
             }
         }
-        if self.frame < 60 && std::env::var_os("EDI_SCREENSHOT").is_some() {
+        if self.frame < screenshot_frame() + 20 && std::env::var_os("EDI_SCREENSHOT").is_some() {
             ctx.request_repaint();
         }
     }
+}
+
+/// `EDI_POINTER`: `;`-separated steps, `c:x,y` (click) or `m:x,y` (move),
+/// one every 8 frames starting at frame 10.
+fn pointer_steps() -> Vec<(bool, egui::Pos2)> {
+    let spec = std::env::var("EDI_POINTER").unwrap_or_default();
+    spec.split(';')
+        .filter_map(|step| {
+            let (kind, xy) = step.split_once(':')?;
+            let (x, y) = xy.split_once(',')?;
+            Some((kind == "c", egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+        })
+        .collect()
+}
+
+fn screenshot_frame() -> u64 {
+    40.max(10 + pointer_steps().len() as u64 * 8 + 20)
 }
 
 fn expand_home(s: &str) -> PathBuf {
@@ -1175,6 +1228,26 @@ fn expand_home(s: &str) -> PathBuf {
 }
 
 impl eframe::App for EdiApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.frame < 10 {
+            return;
+        }
+        let i = (self.frame - 10) as usize;
+        let Some(&(click, pos)) = pointer_steps().get(i / 8) else { return };
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        match i % 8 {
+            0 => raw.events.push(Event::PointerMoved(pos)),
+            1 if click => raw.events.push(button(true)),
+            2 if click => raw.events.push(button(false)),
+            _ => {}
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
@@ -1213,6 +1286,9 @@ impl eframe::App for EdiApp {
         self.dialog_ui(&ctx);
         self.update_title(&ctx);
 
+        egui::Panel::top("menu")
+            .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(4, 2)))
+            .show(ui, |ui| self.menu_ui(ui));
         egui::Panel::top("tabs").frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 0 })).show(ui, |ui| self.tabs_ui(ui));
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(8, 3)))

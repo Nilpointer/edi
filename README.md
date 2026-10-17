@@ -11,6 +11,23 @@ documented behaviour and default key bindings, no Sublime code or assets.
 cargo run --release -- [FILE|FOLDER]...
 ```
 
+## Install (AppImage)
+
+```sh
+./packaging/build-appimage.sh          # → target/appimage/Edi-<version>-x86_64.AppImage
+./target/appimage/Edi-0.1.0-x86_64.AppImage --install
+```
+
+`--install` copies the AppImage to `~/.local/share/edi/`, adds Edi to the
+application menu with its icon, and links `~/.local/bin/edi`. `--uninstall`
+removes all of that. Run the AppImage without arguments (or with files and
+folders) to use it without installing.
+
+The build script compiles inside an Ubuntu 22.04 container (podman or
+docker), so the AppImage runs on any x86_64 distro with glibc 2.35 or newer
+(Ubuntu 22.04+, Debian 12+, Fedora 36+). It downloads pinned, SHA-256-checked
+releases of `appimagetool` and the AppImage runtime.
+
 ## Features
 
 - **Multiple selections**: Ctrl+D adds the next occurrence, Ctrl+click adds a
@@ -21,6 +38,9 @@ cargo run --release -- [FILE|FOLDER]...
   (respects `.gitignore`). `file:42` jumps to a line, `:42` goes to a line
   live, and `@name` lists symbols. Ctrl+G and Ctrl+R open it prefixed.
 - **Command palette** (Ctrl+Shift+P) with fuzzy matching and key hints.
+- **Menu bar** laid out like Sublime's (File, Edit, Selection, Find, View,
+  Goto, Tools, Preferences, Help) with shortcuts shown, check marks for
+  toggles, and Syntax / Color Scheme / Switch File submenus.
 - **Syntax highlighting** for 68 languages via syntect (which reads
   Sublime-format grammars), cached per line and re-highlighted incrementally
   within a per-frame time budget.
@@ -59,6 +79,7 @@ cargo run --release -- [FILE|FOLDER]...
 | Ctrl+F / Ctrl+H, F3 / Shift+F3 | Find / replace, next / previous |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Font size |
 | Ctrl+PageDown / PageUp | Next / previous tab |
+| Alt+1 … Alt+9 | Switch to tab 1–8 / last tab |
 
 ## Layout
 
@@ -70,12 +91,17 @@ cargo run --release -- [FILE|FOLDER]...
 | `src/commands.rs` | Command list and keymap (including chords) |
 | `src/fuzzy.rs` | Fuzzy scorer for Goto Anything and the palette |
 | `src/app.rs` | Window shell: tabs, side bar, overlays, find panel, dialogs |
+| `src/app/menu.rs` | Menu bar |
+| `assets/edi.svg` | App icon (PNG sizes in `assets/icons/`) |
+| `packaging/` | AppImage build script, `AppRun`, desktop entry, build container |
 
 `cargo test` covers the buffer operations, keymap and fuzzy matcher.
 
 For development, `EDI_RUN="Command Palette"`, `EDI_QUERY=text` and
 `EDI_SCREENSHOT=out.ppm` run commands, fill the overlay and save a
-screenshot before exiting. Keyboard input is ignored in that mode.
+screenshot before exiting. `EDI_POINTER="c:25,12;m:80,170"` injects clicks
+(`c`) and pointer moves (`m`), e.g. to open menus. Keyboard input is ignored
+in that mode.
 
 ## Not yet implemented
 
