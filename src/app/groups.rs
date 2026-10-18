@@ -67,6 +67,7 @@ impl PaneLayout {
 enum TabAction {
     Activate(usize),
     Close(usize),
+    CloseMany(Vec<usize>),
     MoveTo(usize, usize),
 }
 
@@ -292,6 +293,7 @@ impl EdiApp {
             match a {
                 TabAction::Activate(i) => self.activate(i),
                 TabAction::Close(i) => self.close_tab(i, false),
+                TabAction::CloseMany(tabs) => self.close_many(tabs),
                 TabAction::MoveTo(i, g) => self.move_to_group(i, g),
             }
         }
@@ -371,8 +373,21 @@ impl EdiApp {
                             resp
                         };
                         resp.context_menu(|ui| {
+                            // Left/right/all refer to this pane's tabs.
+                            let strip = self.tabs_in_group(g);
+                            let pos = strip.iter().position(|&t| t == i).unwrap_or(0);
+                            let (left, right) = (strip[..pos].to_vec(), strip[pos + 1..].to_vec());
                             if ui.button("Close").clicked() {
                                 actions.push(TabAction::Close(i));
+                            }
+                            if ui.add_enabled(!left.is_empty(), egui::Button::new("Close Tabs to the Left")).clicked() {
+                                actions.push(TabAction::CloseMany(left));
+                            }
+                            if ui.add_enabled(!right.is_empty(), egui::Button::new("Close Tabs to the Right")).clicked() {
+                                actions.push(TabAction::CloseMany(right));
+                            }
+                            if ui.button("Close All").clicked() {
+                                actions.push(TabAction::CloseMany(strip));
                             }
                             if groups > 1 {
                                 ui.separator();

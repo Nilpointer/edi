@@ -152,6 +152,9 @@ pub struct EdiApp {
     /// Active tab of each group.
     group_active: Vec<Option<usize>>,
     focus_group: usize,
+    /// Tabs still to close for Close All / Left / Right, ascending; closed
+    /// from the end so the remaining indices stay valid.
+    close_queue: Vec<usize>,
     /// Running Find in Files search, with the pattern and flags for the header.
     fif: Option<(find_files::Job, Matcher, String, String)>,
 }
@@ -188,6 +191,7 @@ impl EdiApp {
             session_saved: Instant::now(),
             primary: None,
             fif: None,
+            close_queue: Vec::new(),
             layout: PaneLayout::Single,
             preview_urls: HashMap::new(),
             group_active: vec![None],
@@ -478,6 +482,25 @@ impl EdiApp {
         }
     }
 
+    /// Close several tabs, asking about each unsaved one in turn.
+    fn close_many(&mut self, mut tabs: Vec<usize>) {
+        tabs.sort_unstable();
+        tabs.dedup();
+        self.close_queue = tabs;
+        self.process_close_queue();
+    }
+
+    fn process_close_queue(&mut self) {
+        while self.dialog.is_none() {
+            let Some(i) = self.close_queue.pop() else { break };
+            // Closing the last tab replaces it with a new untitled one; don't
+            // close that one too.
+            if i < self.tabs.len() && !(self.tabs.len() == 1 && self.tabs[0].buf.path.is_none() && self.tabs[0].buf.len() == 0) {
+                self.close_tab(i, false);
+            }
+        }
+    }
+
     fn save(&mut self, i: usize) -> bool {
         let Some(t) = self.tabs.get_mut(i) else { return false };
         if t.buf.path.is_none() {
@@ -545,15 +568,7 @@ impl EdiApp {
             Cmd::Cut => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
             Cmd::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
             Cmd::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
-            Cmd::CloseAll => {
-                // Close clean tabs; stop at the first dirty one and ask.
-                for i in (0..self.tabs.len()).rev() {
-                    self.close_tab(i, false);
-                    if self.dialog.is_some() {
-                        break;
-                    }
-                }
-            }
+            Cmd::CloseAll => self.close_many((0..self.tabs.len()).collect()),
             Cmd::About => self.dialog = Some(Dialog::About),
             Cmd::ToggleHotExit => {
                 self.hot_exit = !self.hot_exit;
@@ -1551,6 +1566,8 @@ impl EdiApp {
                 self.quit_confirmed = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+            // Cancelling one file's prompt cancels the rest of a multi-close.
+            (Dialog::CloseTab(_), _) => self.close_queue.clear(),
             _ => {}
         }
         self.focus_editor = true;
@@ -1650,15 +1667,20 @@ impl EdiApp {
     }
 }
 
-/// `EDI_POINTER`: `;`-separated steps, `c:x,y` (click) or `m:x,y` (move),
-/// one every 8 frames starting at frame 10.
-fn pointer_steps() -> Vec<(bool, egui::Pos2)> {
+/// `EDI_POINTER`: `;`-separated steps, `c:x,y` (click), `r:x,y` (right
+/// click) or `m:x,y` (move), one every 8 frames starting at frame 10.
+fn pointer_steps() -> Vec<(Option<egui::PointerButton>, egui::Pos2)> {
     let spec = std::env::var("EDI_POINTER").unwrap_or_default();
     spec.split(';')
         .filter_map(|step| {
             let (kind, xy) = step.split_once(':')?;
             let (x, y) = xy.split_once(',')?;
-            Some((kind == "c", egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+            let button = match kind {
+                "c" => Some(egui::PointerButton::Primary),
+                "r" => Some(egui::PointerButton::Secondary),
+                _ => None,
+            };
+            Some((button, egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
         })
         .collect()
 }
@@ -1687,17 +1709,12 @@ impl eframe::App for EdiApp {
             return;
         }
         let i = (self.frame - 10) as usize;
-        let Some(&(click, pos)) = pointer_steps().get(i / 8) else { return };
-        let button = |pressed| Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Modifiers::NONE,
-        };
-        match i % 8 {
-            0 => raw.events.push(Event::PointerMoved(pos)),
-            1 if click => raw.events.push(button(true)),
-            2 if click => raw.events.push(button(false)),
+        let Some(&(button, pos)) = pointer_steps().get(i / 8) else { return };
+        let press = |button, pressed| Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE };
+        match (i % 8, button) {
+            (0, _) => raw.events.push(Event::PointerMoved(pos)),
+            (1, Some(b)) => raw.events.push(press(b, true)),
+            (2, Some(b)) => raw.events.push(press(b, false)),
             _ => {}
         }
     }
@@ -1740,6 +1757,7 @@ impl eframe::App for EdiApp {
         if self.dialog.is_none() {
             self.dispatch_keys(&ctx);
         }
+        self.process_close_queue();
         if let Some(l) = self.pending_line.take() {
             self.goto(l);
         }

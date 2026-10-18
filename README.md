@@ -231,7 +231,7 @@ For testing the UI without a person at the keyboard:
 |---|---|
 | `EDI_RUN="Command Palette,…"` | Run commands by their palette name at startup. |
 | `EDI_QUERY=text` | Fill the open overlay or the find field. |
-| `EDI_POINTER="c:25,12;m:80,170"` | Inject clicks (`c`) and pointer moves (`m`), one every few frames. |
+| `EDI_POINTER="c:25,12;r:90,40;m:80,170"` | Inject clicks (`c`), right-clicks (`r`) and pointer moves (`m`), one every few frames. |
 | `EDI_SCREENSHOT=out.ppm` | Save a screenshot, then exit. Keyboard input is ignored in this mode, and the window opens without taking focus. |
 
 Combine `EDI_SCREENSHOT` with `EDI_DATA_DIR` to test session and
