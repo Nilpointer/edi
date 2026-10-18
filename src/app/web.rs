@@ -14,6 +14,7 @@ impl EdiApp {
         let mut b = Browser::new(url);
         b.focus_address = url.is_empty();
         let tab = Tab {
+            id: self.alloc_tab_id(),
             buf: Buffer::scratch("Browser", ""),
             hl: HlCache::new("Plain Text"),
             view: ViewState::default(),

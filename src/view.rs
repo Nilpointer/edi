@@ -42,6 +42,8 @@ impl ViewState {
 }
 
 pub struct Tab {
+    /// Stable identity; indices into the tab list shift as tabs close.
+    pub id: u64,
     pub buf: Buffer,
     pub hl: HlCache,
     pub view: ViewState,

@@ -111,7 +111,8 @@ impl FindPanel {
 }
 
 enum Dialog {
-    CloseTab(usize),
+    /// Unsaved changes in the tab with this id.
+    CloseTab(u64),
     Quit,
     About,
 }
@@ -152,9 +153,9 @@ pub struct EdiApp {
     /// Active tab of each group.
     group_active: Vec<Option<usize>>,
     focus_group: usize,
-    /// Tabs still to close for Close All / Left / Right, ascending; closed
-    /// from the end so the remaining indices stay valid.
-    close_queue: Vec<usize>,
+    /// Ids of tabs still to close for Close All / Left / Right.
+    close_queue: Vec<u64>,
+    next_tab_id: u64,
     /// Running Find in Files search, with the pattern and flags for the header.
     fif: Option<(find_files::Job, Matcher, String, String)>,
 }
@@ -192,6 +193,7 @@ impl EdiApp {
             primary: None,
             fif: None,
             close_queue: Vec::new(),
+            next_tab_id: 0,
             layout: PaneLayout::Single,
             preview_urls: HashMap::new(),
             group_active: vec![None],
@@ -433,7 +435,8 @@ impl EdiApp {
         let first: String = buf.line_str(0);
         let syntax = self.syn.detect(buf.path.as_deref(), &first).name.clone();
         let group = self.focus_group;
-        self.tabs.push(Tab { buf, hl: HlCache::new(&syntax), view: ViewState::default(), results: None, group, browser: None });
+        let id = self.alloc_tab_id();
+        self.tabs.push(Tab { id, buf, hl: HlCache::new(&syntax), view: ViewState::default(), results: None, group, browser: None });
         self.activate(self.tabs.len() - 1);
     }
 
@@ -466,7 +469,7 @@ impl EdiApp {
             return;
         }
         if !force && self.tabs[i].buf.is_dirty() {
-            self.dialog = Some(Dialog::CloseTab(i));
+            self.dialog = Some(Dialog::CloseTab(self.tabs[i].id));
             return;
         }
         let group = self.tabs[i].group;
@@ -482,20 +485,28 @@ impl EdiApp {
         }
     }
 
-    /// Close several tabs, asking about each unsaved one in turn.
-    fn close_many(&mut self, mut tabs: Vec<usize>) {
-        tabs.sort_unstable();
-        tabs.dedup();
-        self.close_queue = tabs;
+    fn alloc_tab_id(&mut self) -> u64 {
+        self.next_tab_id += 1;
+        self.next_tab_id
+    }
+
+    fn tab_index(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// Close several tabs, asking about each unsaved one in turn. Tabs are
+    /// queued by id, so closing or moving tabs while a prompt is open can't
+    /// redirect the batch to other tabs.
+    fn close_many(&mut self, tabs: Vec<usize>) {
+        self.close_queue = tabs.iter().filter_map(|&i| self.tabs.get(i).map(|t| t.id)).collect();
         self.process_close_queue();
     }
 
     fn process_close_queue(&mut self) {
         while self.dialog.is_none() {
-            let Some(i) = self.close_queue.pop() else { break };
-            // Closing the last tab replaces it with a new untitled one; don't
-            // close that one too.
-            if i < self.tabs.len() && !(self.tabs.len() == 1 && self.tabs[0].buf.path.is_none() && self.tabs[0].buf.len() == 0) {
+            let Some(id) = self.close_queue.pop() else { break };
+            // Tabs closed in the meantime are simply skipped.
+            if let Some(i) = self.tab_index(id) {
                 self.close_tab(i, false);
             }
         }
@@ -569,7 +580,10 @@ impl EdiApp {
             Cmd::Copy => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
             Cmd::Paste => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
             Cmd::CloseAll => self.close_many((0..self.tabs.len()).collect()),
-            Cmd::About => self.dialog = Some(Dialog::About),
+            Cmd::About => {
+                self.close_queue.clear();
+                self.dialog = Some(Dialog::About);
+            }
             Cmd::ToggleHotExit => {
                 self.hot_exit = !self.hot_exit;
                 self.set_status(if self.hot_exit { "Hot exit on" } else { "Hot exit off: unsaved files will prompt on quit" });
@@ -1495,7 +1509,10 @@ impl EdiApp {
     fn dialog_ui(&mut self, ctx: &egui::Context) {
         let Some(d) = &self.dialog else { return };
         let (title, msg) = match d {
-            Dialog::CloseTab(i) => ("Unsaved changes", format!("Save changes to {} before closing?", self.tabs.get(*i).map(|t| t.buf.name()).unwrap_or_default())),
+            Dialog::CloseTab(id) => {
+                let name = self.tab_index(*id).map(|i| self.tabs[i].buf.name()).unwrap_or_default();
+                ("Unsaved changes", format!("Save changes to {name} before closing?"))
+            }
             Dialog::Quit => {
                 let n = self.tabs.iter().filter(|t| t.buf.is_dirty()).count();
                 ("Quit", format!("{n} file(s) have unsaved changes. Quit anyway?"))
@@ -1549,12 +1566,17 @@ impl EdiApp {
         let Some(c) = choice else { return };
         let d = self.dialog.take().unwrap();
         match (d, c) {
-            (Dialog::CloseTab(i), "save") => {
-                if self.save(i) {
+            (Dialog::CloseTab(id), "save") => match self.tab_index(id) {
+                Some(i) if self.save(i) => self.close_tab(i, true),
+                // Save As still pending, or the save failed: stop the batch
+                // rather than closing more tabs behind it.
+                _ => self.close_queue.clear(),
+            },
+            (Dialog::CloseTab(id), "discard") => {
+                if let Some(i) = self.tab_index(id) {
                     self.close_tab(i, true);
                 }
             }
-            (Dialog::CloseTab(i), "discard") => self.close_tab(i, true),
             (Dialog::Quit, "save") => {
                 let all_saved = (0..self.tabs.len()).filter(|&i| self.tabs[i].buf.is_dirty()).collect::<Vec<_>>().into_iter().all(|i| self.save(i));
                 if all_saved {
@@ -1669,9 +1691,11 @@ impl EdiApp {
 
 /// `EDI_POINTER`: `;`-separated steps, `c:x,y` (click), `r:x,y` (right
 /// click) or `m:x,y` (move), one every 8 frames starting at frame 10.
-fn pointer_steps() -> Vec<(Option<egui::PointerButton>, egui::Pos2)> {
-    let spec = std::env::var("EDI_POINTER").unwrap_or_default();
-    spec.split(';')
+fn pointer_steps() -> &'static [(Option<egui::PointerButton>, egui::Pos2)] {
+    static STEPS: std::sync::OnceLock<Vec<(Option<egui::PointerButton>, egui::Pos2)>> = std::sync::OnceLock::new();
+    STEPS.get_or_init(|| {
+        let spec = std::env::var("EDI_POINTER").unwrap_or_default();
+        spec.split(';')
         .filter_map(|step| {
             let (kind, xy) = step.split_once(':')?;
             let (x, y) = xy.split_once(',')?;
@@ -1683,6 +1707,7 @@ fn pointer_steps() -> Vec<(Option<egui::PointerButton>, egui::Pos2)> {
             Some((button, egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
         })
         .collect()
+    })
 }
 
 fn screenshot_frame() -> u64 {
@@ -1751,6 +1776,8 @@ impl eframe::App for EdiApp {
             && self.tabs.iter().any(|t| t.buf.is_dirty())
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            // Quitting supersedes a pending multi-close.
+            self.close_queue.clear();
             self.dialog = Some(Dialog::Quit);
         }
 
