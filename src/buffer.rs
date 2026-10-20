@@ -71,6 +71,59 @@ pub struct Buffer {
     folds: Vec<Fold>,
     /// Bumped whenever the set of folds changes.
     pub fold_gen: u64,
+    /// How the file was encoded on disk; saves write it back the same way.
+    encoding: Encoding,
+}
+
+/// On-disk text encodings we can read and write back faithfully.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    /// Anything that is not valid UTF-8 and has no NUL bytes: each byte is one char.
+    Latin1,
+}
+
+/// Decode a file's bytes, or `None` if it looks binary.
+fn decode(bytes: Vec<u8>) -> Option<(String, Encoding)> {
+    let utf16 = |rest: &[u8], le: bool| {
+        let units = rest.chunks(2).map(|c| {
+            let pair = [c[0], *c.get(1).unwrap_or(&0)];
+            if le { u16::from_le_bytes(pair) } else { u16::from_be_bytes(pair) }
+        });
+        char::decode_utf16(units).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)).collect::<String>()
+    };
+    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        return Some((String::from_utf8_lossy(rest).into_owned(), Encoding::Utf8Bom));
+    }
+    if let Some(rest) = bytes.strip_prefix(b"\xFF\xFE") {
+        return Some((utf16(rest, true), Encoding::Utf16Le));
+    }
+    if let Some(rest) = bytes.strip_prefix(b"\xFE\xFF") {
+        return Some((utf16(rest, false), Encoding::Utf16Be));
+    }
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return None;
+    }
+    match String::from_utf8(bytes) {
+        Ok(s) => Some((s, Encoding::Utf8)),
+        Err(e) => Some((e.into_bytes().iter().map(|&b| b as char).collect(), Encoding::Latin1)),
+    }
+}
+
+fn encode(text: &Rope, enc: Encoding) -> Vec<u8> {
+    let s = text.to_string();
+    match enc {
+        Encoding::Utf8 => s.into_bytes(),
+        Encoding::Utf8Bom => [b"\xEF\xBB\xBF".as_slice(), s.as_bytes()].concat(),
+        Encoding::Utf16Le => [0xFF, 0xFE].into_iter().chain(s.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
+        Encoding::Utf16Be => [0xFE, 0xFF].into_iter().chain(s.encode_utf16().flat_map(u16::to_be_bytes)).collect(),
+        // Fall back to UTF-8 if the user typed something Latin-1 cannot hold.
+        Encoding::Latin1 if s.chars().all(|c| (c as u32) < 0x100) => s.chars().map(|c| c as u8).collect(),
+        Encoding::Latin1 => s.into_bytes(),
+    }
 }
 
 /// A hidden region: from the start of its first hidden line to the end of
@@ -111,10 +164,13 @@ impl Buffer {
     }
 
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
+        let (text, encoding) = decode(std::fs::read(path)?)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "binary file"))?;
         // Normalise line endings; files are written back with \n.
         let text = text.replace("\r\n", "\n");
-        Ok(Self::from_rope(Rope::from_str(&text), Some(path.to_path_buf())))
+        let mut b = Self::from_rope(Rope::from_str(&text), Some(path.to_path_buf()));
+        b.encoding = encoding;
+        Ok(b)
     }
 
     /// Rebuild a buffer from a saved session. The file on disk (if any)
@@ -158,6 +214,7 @@ impl Buffer {
             label: None,
             folds: Vec::new(),
             fold_gen: 0,
+            encoding: Encoding::Utf8,
         }
     }
 
@@ -170,10 +227,7 @@ impl Buffer {
 
     pub fn save(&mut self) -> std::io::Result<()> {
         let path = self.path.clone().ok_or_else(|| std::io::Error::other("no path"))?;
-        let mut file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        self.rope.write_to(&mut file)?;
-        use std::io::Write;
-        file.flush()?;
+        std::fs::write(&path, encode(&self.rope, self.encoding))?;
         self.saved_rope = self.rope.clone();
         self.dirty_memo.set((self.version, false));
         Ok(())
@@ -1665,5 +1719,28 @@ mod regress {
         b.split_into_lines();
         b.toggle_comment("#");
         assert_eq!(b.rope.to_string(), "# import os\n\n\n# class A:\n#     x = 1\n");
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_and_round_trips_encodings() {
+        let xml = "<?xml version=\"1.0\"?>\n<a>ä€</a>\n";
+        let utf16le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(xml.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let utf16be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(xml.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        let bom = [b"\xEF\xBB\xBF".as_slice(), xml.as_bytes()].concat();
+        for (bytes, enc) in [(utf16le, Encoding::Utf16Le), (utf16be, Encoding::Utf16Be), (bom, Encoding::Utf8Bom), (xml.as_bytes().to_vec(), Encoding::Utf8)] {
+            let (text, e) = decode(bytes.clone()).unwrap();
+            assert_eq!((text.as_str(), e), (xml, enc));
+            assert_eq!(encode(&Rope::from_str(&text), e), bytes);
+        }
+        let latin1 = b"<a>\xE4</a>".to_vec();
+        let (text, e) = decode(latin1.clone()).unwrap();
+        assert_eq!((text.as_str(), e), ("<a>ä</a>", Encoding::Latin1));
+        assert_eq!(encode(&Rope::from_str(&text), e), latin1);
+        assert!(decode(b"\x89PNG\r\n\x1a\n\0\0".to_vec()).is_none());
     }
 }
