@@ -2,6 +2,7 @@
 
 use super::EdiApp;
 use crate::commands::{Cmd, Keymap};
+use crate::pretty::Format;
 use eframe::egui::{self, AtomExt, Button, Ui};
 
 /// What a menu click asks for; applied after the menu is drawn so the menu
@@ -118,6 +119,17 @@ impl EdiApp {
                 });
                 ui.separator();
                 m.item(ui, "Sort Lines", Cmd::SortLines);
+                ui.menu_button("Pretty Print", |ui| {
+                    ui.set_min_width(210.0);
+                    m.item(ui, "Auto-Detect", Cmd::PrettyPrint(None));
+                    ui.separator();
+                    m.item(ui, "JSON", Cmd::PrettyPrint(Some(Format::Json)));
+                    m.item(ui, "XML", Cmd::PrettyPrint(Some(Format::Xml)));
+                    m.item(ui, "HTML", Cmd::PrettyPrint(Some(Format::Html)));
+                    m.item(ui, "CSS / SCSS / Less", Cmd::PrettyPrint(Some(Format::Css)));
+                    m.item(ui, "SQL", Cmd::PrettyPrint(Some(Format::Sql)));
+                    m.item(ui, "Markdown Tables", Cmd::PrettyPrint(Some(Format::Markdown)));
+                });
             });
 
             ui.menu_button("Selection", |ui| {

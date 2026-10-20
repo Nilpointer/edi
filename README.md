@@ -23,6 +23,11 @@ assets.
   Enter, whole-line copy/cut/paste when nothing is selected, toggle comment,
   duplicate/swap/delete/join/sort lines, case conversion, jump to matching
   bracket, and undo that groups typing.
+- **Pretty Print** (Ctrl+Alt+J) for JSON, XML, HTML, CSS/SCSS/Less, SQL and
+  Markdown tables. It picks the format from the file type (or, for a
+  selection, from what the text looks like), formats the selection or the
+  whole file, and changes only whitespace, so key order, numbers and comments
+  survive. *Pretty Print: …* in the Command Palette forces a format.
 - **Syntax highlighting** for 68 languages (via syntect, which reads
   Sublime-format grammars), updated incrementally as you type.
 - **Color schemes**: Monokai by default plus several others, with live preview
@@ -172,6 +177,7 @@ Edi follows Sublime Text's default Linux key bindings; where Sublime has none
 | Ctrl+M | Jump to matching bracket |
 | F9 | Sort lines |
 | Ctrl+K Ctrl+U / Ctrl+K Ctrl+L | Upper case / lower case |
+| Ctrl+Alt+J | Pretty print |
 | **Search** | |
 | Ctrl+F / Ctrl+H | Find / replace |
 | F3 / Shift+F3 | Find next / previous |
@@ -247,6 +253,7 @@ single-instance behaviour without touching your real session.
 | `src/highlight.rs` | Syntax highlighting with an incremental per-line cache |
 | `src/search.rs` | Search options, regex compilation, replacement expansion |
 | `src/find_files.rs` | Find in Files: background search and the results buffer |
+| `src/pretty.rs`, `src/pretty/` | Pretty Print: format detection and the per-format formatters |
 | `src/browser.rs` | Embedded webview (wry) and URL handling |
 | `src/session.rs` | Hot exit: session format and crash-safe background writer |
 | `src/instance.rs` | Single instance: lock file and local socket |

@@ -4,6 +4,7 @@
 //! applied to all selections at once, which is what gives the editor its
 //! multi-cursor behaviour.
 
+use crate::pretty::{self, Format};
 use crate::search::Matcher;
 use ropey::Rope;
 use std::cell::Cell;
@@ -1436,6 +1437,44 @@ impl Buffer {
         }
     }
 
+    /// Pretty print each selection, or the whole buffer when nothing is
+    /// selected, as `forced` or else the format detected from the file and
+    /// the text. Nothing changes if any of them fails to parse. Returns the
+    /// format used (the first one, with several selections).
+    pub fn pretty_print(&mut self, forced: Option<Format>, syntax: &str) -> Result<Format, String> {
+        let file = Format::of_file(self.path.as_deref(), syntax);
+        let pick = |text: &str, whole| {
+            forced
+                .or_else(|| pretty::detect(file, text, whole))
+                .ok_or_else(|| "Pretty Print: unknown format; pick one with Pretty Print: … in the Command Palette".to_string())
+        };
+        let unit = " ".repeat(TAB_SIZE);
+        if self.sels.iter().all(|s| s.is_empty()) {
+            let text = self.rope.to_string();
+            let fmt = pick(&text, true)?;
+            let mut out = pretty::format(fmt, &text, &unit, "")?;
+            if text.ends_with('\n') && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if out != text {
+                self.apply(EditKind::Other, vec![(0, self.len(), out, Some(0))]);
+            }
+            return Ok(fmt);
+        }
+        let mut edits = Vec::new();
+        let mut first = None;
+        for s in self.sels.iter().filter(|s| !s.is_empty()) {
+            let text = self.sel_text(s);
+            let fmt = pick(&text, false)?;
+            first.get_or_insert(fmt);
+            let line = self.rope.line(self.rope.char_to_line(s.start()));
+            let base: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            edits.push((s.start(), s.end(), pretty::format(fmt, &text, &unit, &base)?, None));
+        }
+        self.apply(EditKind::Other, edits);
+        Ok(first.unwrap_or(Format::Json))
+    }
+
     // ----------------------------------------------------------------------
     // Clipboard
 
@@ -1742,5 +1781,28 @@ mod encoding_tests {
         assert_eq!((text.as_str(), e), ("<a>ä</a>", Encoding::Latin1));
         assert_eq!(encode(&Rope::from_str(&text), e), latin1);
         assert!(decode(b"\x89PNG\r\n\x1a\n\0\0".to_vec()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod pretty_tests {
+    use super::*;
+
+    #[test]
+    fn pretty_prints_buffer_and_selection() {
+        let mut b = Buffer::scratch("t", "{\"a\":[1]}\n");
+        assert_eq!(b.pretty_print(None, "JSON"), Ok(Format::Json));
+        assert_eq!(b.rope.to_string(), "{\n    \"a\": [\n        1\n    ]\n}\n");
+        b.undo();
+        assert_eq!(b.rope.to_string(), "{\"a\":[1]}\n");
+
+        let mut b = Buffer::scratch("t", "  x = <a><b/></a>;");
+        b.sels = vec![Sel::new(6, 17)];
+        assert_eq!(b.pretty_print(None, "Plain Text"), Ok(Format::Xml));
+        assert_eq!(b.rope.to_string(), "  x = <a>\n      <b/>\n  </a>;");
+        assert!(Buffer::scratch("t", "hello").pretty_print(None, "Plain Text").is_err());
+        let mut b = Buffer::scratch("t", "select 1");
+        assert_eq!(b.pretty_print(Some(Format::Sql), "Plain Text"), Ok(Format::Sql));
+        assert_eq!(b.rope.to_string(), "SELECT 1");
     }
 }

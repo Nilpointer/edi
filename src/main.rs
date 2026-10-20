@@ -10,6 +10,7 @@ mod find_files;
 mod fuzzy;
 mod highlight;
 mod instance;
+mod pretty;
 mod search;
 mod session;
 mod view;

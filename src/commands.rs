@@ -1,5 +1,6 @@
 //! Command registry and keymap. Bindings follow Sublime Text's Linux defaults.
 
+use crate::pretty::Format;
 use eframe::egui::{Key, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,8 @@ pub enum Cmd {
     SortLines,
     UpperCase,
     LowerCase,
+    /// Pretty print as the given format, or as the detected one.
+    PrettyPrint(Option<Format>),
     GotoBracket,
     Cut,
     Copy,
@@ -146,6 +149,13 @@ pub const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::SortLines, "Edit: Sort Lines", "f9"),
     (Cmd::UpperCase, "Edit: Convert to Upper Case", "ctrl+k ctrl+u"),
     (Cmd::LowerCase, "Edit: Convert to Lower Case", "ctrl+k ctrl+l"),
+    (Cmd::PrettyPrint(None), "Pretty Print", "ctrl+alt+j"),
+    (Cmd::PrettyPrint(Some(Format::Json)), "Pretty Print: JSON", ""),
+    (Cmd::PrettyPrint(Some(Format::Xml)), "Pretty Print: XML", ""),
+    (Cmd::PrettyPrint(Some(Format::Html)), "Pretty Print: HTML", ""),
+    (Cmd::PrettyPrint(Some(Format::Css)), "Pretty Print: CSS / SCSS / Less", ""),
+    (Cmd::PrettyPrint(Some(Format::Sql)), "Pretty Print: SQL", ""),
+    (Cmd::PrettyPrint(Some(Format::Markdown)), "Pretty Print: Markdown Tables", ""),
     (Cmd::GotoBracket, "Goto: Jump to Matching Bracket", "ctrl+m"),
     // Clipboard keys are delivered by egui as Cut/Copy/Paste events, so these
     // have no binding here; `label` still shows the usual shortcut.

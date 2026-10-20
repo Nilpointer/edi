@@ -657,6 +657,13 @@ impl EdiApp {
             Cmd::ZoomIn => self.font_size = (self.font_size + 1.0).min(48.0),
             Cmd::ZoomOut => self.font_size = (self.font_size - 1.0).max(7.0),
             Cmd::ZoomReset => self.font_size = DEFAULT_FONT_SIZE,
+            Cmd::PrettyPrint(fmt) => {
+                let Some(t) = self.tabs.get_mut(self.active) else { return };
+                match t.buf.pretty_print(fmt, &t.hl.syntax) {
+                    Ok(f) => self.set_status(format!("Pretty printed as {}", f.name())),
+                    Err(e) => self.set_status(e),
+                }
+            }
             _ => {
                 let Some(t) = self.tabs.get_mut(self.active) else { return };
                 let b = &mut t.buf;
