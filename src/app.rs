@@ -1696,10 +1696,21 @@ impl EdiApp {
     }
 }
 
+/// What one `EDI_POINTER` step does at its position.
+#[derive(Clone, Copy)]
+enum PointerStep {
+    Move,
+    Click(egui::PointerButton),
+    /// Press or release the primary button, for drags.
+    Press,
+    Release,
+}
+
 /// `EDI_POINTER`: `;`-separated steps, `c:x,y` (click), `r:x,y` (right
-/// click) or `m:x,y` (move), one every 8 frames starting at frame 10.
-fn pointer_steps() -> &'static [(Option<egui::PointerButton>, egui::Pos2)] {
-    static STEPS: std::sync::OnceLock<Vec<(Option<egui::PointerButton>, egui::Pos2)>> = std::sync::OnceLock::new();
+/// click), `m:x,y` (move), `p:x,y` / `u:x,y` (press / release, for drags),
+/// one every 8 frames starting at frame 10.
+fn pointer_steps() -> &'static [(PointerStep, egui::Pos2)] {
+    static STEPS: std::sync::OnceLock<Vec<(PointerStep, egui::Pos2)>> = std::sync::OnceLock::new();
     STEPS.get_or_init(|| {
         let spec = std::env::var("EDI_POINTER").unwrap_or_default();
         spec.split(';')
@@ -1707,9 +1718,11 @@ fn pointer_steps() -> &'static [(Option<egui::PointerButton>, egui::Pos2)] {
             let (kind, xy) = step.split_once(':')?;
             let (x, y) = xy.split_once(',')?;
             let button = match kind {
-                "c" => Some(egui::PointerButton::Primary),
-                "r" => Some(egui::PointerButton::Secondary),
-                _ => None,
+                "c" => PointerStep::Click(egui::PointerButton::Primary),
+                "r" => PointerStep::Click(egui::PointerButton::Secondary),
+                "p" => PointerStep::Press,
+                "u" => PointerStep::Release,
+                _ => PointerStep::Move,
             };
             Some((button, egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?)))
         })
@@ -1741,12 +1754,15 @@ impl eframe::App for EdiApp {
             return;
         }
         let i = (self.frame - 10) as usize;
-        let Some(&(button, pos)) = pointer_steps().get(i / 8) else { return };
+        let Some(&(step, pos)) = pointer_steps().get(i / 8) else { return };
         let press = |button, pressed| Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE };
-        match (i % 8, button) {
+        let primary = egui::PointerButton::Primary;
+        match (i % 8, step) {
             (0, _) => raw.events.push(Event::PointerMoved(pos)),
-            (1, Some(b)) => raw.events.push(press(b, true)),
-            (2, Some(b)) => raw.events.push(press(b, false)),
+            (1, PointerStep::Click(b)) => raw.events.push(press(b, true)),
+            (2, PointerStep::Click(b)) => raw.events.push(press(b, false)),
+            (1, PointerStep::Press) => raw.events.push(press(primary, true)),
+            (1, PointerStep::Release) => raw.events.push(press(primary, false)),
             _ => {}
         }
     }

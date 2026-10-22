@@ -12,6 +12,8 @@ use eframe::egui::{
 use std::time::{Duration, Instant};
 
 const MINIMAP_W: f32 = 110.0;
+/// Scrollbar track thickness.
+const SCROLLBAR: f32 = 12.0;
 const MM_LH: f32 = 2.6;
 const MM_CW: f32 = 1.1;
 
@@ -28,9 +30,26 @@ pub struct ViewState {
     activity: f64,
     /// Line ↔ row mapping (wrap and folds), rebuilt when its inputs change.
     map: Option<(MapKey, DisplayMap)>,
+    /// Widest line in columns, for the horizontal scrollbar: (version, cols, when).
+    widest: Option<(u64, usize, Instant)>,
 }
 
 impl ViewState {
+    /// Width of the longest line, in columns. Recomputed after edits, but at
+    /// most a few times a second so typing in big files stays fast.
+    fn widest(&mut self, buf: &Buffer) -> usize {
+        match self.widest {
+            Some((v, cols, _)) if v == buf.version => cols,
+            Some((_, cols, at)) if at.elapsed() < Duration::from_millis(300) => cols,
+            _ => {
+                // Visual width, so tab-indented lines are measured correctly.
+                let cols = (0..buf.line_count()).map(|l| buf.visual_col(l, buf.line_len(l))).max().unwrap_or(0);
+                self.widest = Some((buf.version, cols, Instant::now()));
+                cols
+            }
+        }
+    }
+
     /// The display map for the buffer's current state.
     fn map(&mut self, buf: &Buffer, wrap: Option<usize>) -> &DisplayMap {
         let key = MapKey { version: buf.version, fold_gen: buf.fold_gen, wrap };
@@ -105,9 +124,18 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, cx: &ViewCtx, clip: &mut Clip) -> egui::
     let digits = buf.line_count().to_string().len().max(3) as f32;
     let gutter_w = (digits + 4.0) * m.cw;
     let mm_w = if cx.minimap { MINIMAP_W } else { 0.0 };
-    let text_rect = Rect::from_min_max(Pos2::new(full.left() + gutter_w, full.top()), Pos2::new(full.right() - mm_w, full.bottom()));
-    let gutter_rect = Rect::from_min_max(full.min, Pos2::new(text_rect.left(), full.bottom()));
-    let mm_rect = Rect::from_min_max(Pos2::new(text_rect.right(), full.top()), full.max);
+    // Layout: gutter | text | minimap | vertical scrollbar, with the
+    // horizontal scrollbar under the text when lines are wider than the view.
+    let right = full.right() - SCROLLBAR;
+    let text_left = full.left() + gutter_w;
+    let content_w = vs.widest(buf) as f32 * m.cw + 4.0 + m.cw * 4.0;
+    let show_hbar = !cx.wrap && content_w > right - mm_w - text_left;
+    let bottom = if show_hbar { full.bottom() - SCROLLBAR } else { full.bottom() };
+    let text_rect = Rect::from_min_max(Pos2::new(text_left, full.top()), Pos2::new(right - mm_w, bottom));
+    let gutter_rect = Rect::from_min_max(full.min, Pos2::new(text_rect.left(), bottom));
+    let mm_rect = Rect::from_min_max(Pos2::new(text_rect.right(), full.top()), Pos2::new(right, full.bottom()));
+    let vbar_rect = Rect::from_min_max(Pos2::new(right, full.top()), full.max);
+    let hbar_rect = Rect::from_min_max(Pos2::new(text_rect.left(), bottom), Pos2::new(text_rect.right(), full.bottom()));
     let id = cx.id;
     let resp = ui.interact(Rect::from_min_max(full.min, text_rect.max), id, Sense::click_and_drag());
     let mm_resp = ui.interact(mm_rect, id.with("minimap"), Sense::click_and_drag());
@@ -154,8 +182,17 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, cx: &ViewCtx, clip: &mut Clip) -> egui::
         reveal(buf, vs, &geo);
         vs.reveal = false;
     }
+    // Scrollbars (dragging the thumb or clicking the track). Scrolling past
+    // the end is allowed, but a file that fits shows no thumb.
+    let view_h = text_rect.height();
+    let bar_max_y = if total_rows as f32 * m.lh > view_h { max_y } else { 0.0 };
+    vs.scroll.y = scrollbar(ui, id.with("vscroll"), vbar_rect, true, vs.scroll.y, bar_max_y, view_h, &pal);
+    let max_x = if show_hbar { (content_w - text_rect.width()).max(0.0) } else { 0.0 };
+    if show_hbar {
+        vs.scroll.x = scrollbar(ui, id.with("hscroll"), hbar_rect, false, vs.scroll.x, max_x, text_rect.width(), &pal);
+    }
     vs.scroll.y = vs.scroll.y.clamp(0.0, max_y);
-    vs.scroll.x = if wrap.is_some() { 0.0 } else { vs.scroll.x.max(0.0) };
+    vs.scroll.x = vs.scroll.x.clamp(0.0, max_x);
 
     let first_row = (vs.scroll.y / m.lh).floor() as usize;
     let last_row = (first_row + visible_rows + 2).min(total_rows);
@@ -192,7 +229,76 @@ pub fn show(ui: &mut Ui, tab: &mut Tab, cx: &ViewCtx, clip: &mut Clip) -> egui::
     if cx.minimap {
         paint_minimap(ui, buf, &tab.hl, &pal, mm_rect, mm_first, mm_visible, first_line, last_line - first_line);
     }
+    let (vy, vx) = (vs.scroll.y, vs.scroll.x);
+    paint_scrollbar(ui, id.with("vscroll"), vbar_rect, true, vy, bar_max_y, view_h, &pal);
+    if show_hbar {
+        paint_scrollbar(ui, id.with("hscroll"), hbar_rect, false, vx, max_x, text_rect.width(), &pal);
+    }
     resp
+}
+
+/// Thumb position and length along a scrollbar track.
+fn thumb(along: f32, offset: f32, max: f32, view: f32) -> (f32, f32) {
+    let len = (view / (max + view) * along).clamp(24.0_f32.min(along), along);
+    let start = if max > 0.0 { offset.clamp(0.0, max) / max * (along - len) } else { 0.0 };
+    (start, len)
+}
+
+/// Handle input on a scrollbar track and return the new scroll offset.
+/// Dragging moves the thumb; clicking the track moves by a page.
+#[allow(clippy::too_many_arguments)]
+fn scrollbar(ui: &Ui, id: egui::Id, track: Rect, vertical: bool, offset: f32, max: f32, view: f32, _pal: &Palette) -> f32 {
+    if max <= 0.0 {
+        return offset;
+    }
+    let resp = ui.interact(track, id, Sense::click_and_drag());
+    let (t0, along) = if vertical { (track.top(), track.height()) } else { (track.left(), track.width()) };
+    let (start, len) = thumb(along, offset, max, view);
+    let along_of = |p: Pos2| if vertical { p.y } else { p.x } - t0;
+    let mut offset = offset;
+    let per_px = max / (along - len).max(1.0);
+    if resp.drag_started() {
+        // Grabbing the track outside the thumb jumps the thumb there first.
+        if let Some(p) = resp.interact_pointer_pos().map(along_of) {
+            if p < start || p > start + len {
+                offset = (p - len / 2.0) * per_px;
+            }
+        }
+    }
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        offset += if vertical { d.y } else { d.x } * per_px;
+    } else if resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos().map(along_of) {
+            if p < start {
+                offset -= view;
+            } else if p > start + len {
+                offset += view;
+            }
+        }
+    }
+    offset.clamp(0.0, max)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_scrollbar(ui: &Ui, id: egui::Id, track: Rect, vertical: bool, offset: f32, max: f32, view: f32, pal: &Palette) {
+    let painter = ui.painter_at(track);
+    painter.rect_filled(track, 0.0, pal.bg);
+    if max <= 0.0 {
+        return;
+    }
+    let along = if vertical { track.height() } else { track.width() };
+    let (start, len) = thumb(along, offset, max, view);
+    let r = if vertical {
+        Rect::from_min_max(Pos2::new(track.left() + 3.0, track.top() + start), Pos2::new(track.right() - 3.0, track.top() + start + len))
+    } else {
+        Rect::from_min_max(Pos2::new(track.left() + start, track.top() + 3.0), Pos2::new(track.left() + start + len, track.bottom() - 3.0))
+    };
+    let state = ui.ctx().read_response(id);
+    let active = state.as_ref().is_some_and(|r| r.dragged());
+    let hovered = state.as_ref().is_some_and(|r| r.hovered());
+    let alpha = if active { 0.45 } else if hovered { 0.32 } else { 0.18 };
+    painter.rect_filled(r, 4.0, pal.fg.linear_multiply(alpha));
 }
 
 /// Layout shared by input and painting.
