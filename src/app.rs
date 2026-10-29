@@ -864,9 +864,12 @@ impl EdiApp {
     fn open_overlay(&mut self, mode: Mode) {
         let query = match &mode {
             Mode::OpenFile | Mode::OpenFolder | Mode::SaveAs => {
+                // A never-saved buffer is saved to the home folder by default.
+                let untitled = mode == Mode::SaveAs && self.tab().is_some_and(|t| t.buf.path.is_none());
                 let base = self
                     .tab()
                     .and_then(|t| t.buf.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
+                    .or_else(|| if untitled { std::env::home_dir() } else { None })
                     .or_else(|| self.root.clone())
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
@@ -875,8 +878,11 @@ impl EdiApp {
                     s.push(std::path::MAIN_SEPARATOR);
                 }
                 if mode == Mode::SaveAs {
-                    if let Some(name) = self.tab().and_then(|t| t.buf.path.as_ref()?.file_name().map(|n| n.to_string_lossy().into_owned())) {
-                        s.push_str(&name);
+                    if let Some(t) = self.tab() {
+                        match &t.buf.path {
+                            Some(p) => s.push_str(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                            None => s.push_str(&format!("{}.txt", suggested_stem(&t.buf))),
+                        }
                     }
                 }
                 s
@@ -1732,6 +1738,14 @@ fn pointer_steps() -> &'static [(PointerStep, egui::Pos2)] {
 
 fn screenshot_frame() -> u64 {
     40.max(10 + pointer_steps().len() as u64 * 8 + 20)
+}
+
+/// File name stem for saving an untitled buffer: its tab name, minus
+/// characters that aren't allowed in file names.
+fn suggested_stem(buf: &Buffer) -> String {
+    let s: String = buf.name().chars().filter(|c| !c.is_control() && !r#"/\:*?"<>|"#.contains(*c)).collect();
+    let s = s.trim().trim_end_matches('.').trim();
+    if s.is_empty() { "untitled".into() } else { s.into() }
 }
 
 fn expand_home(s: &str) -> PathBuf {
