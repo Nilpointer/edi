@@ -48,6 +48,10 @@ assets.
 - **Minimap**, **scrollbars** (drag the thumb, click the track to move a page;
   the horizontal one appears when lines are wider than the view), folder
   **side bar**, tabs and status bar.
+- **Show in File Manager** and **Open Terminal Here** (*File* menu): open the
+  active file's folder in Explorer, Finder, Nautilus, Dolphin… with the file
+  selected, or the default terminal in that folder (on Linux: `$TERMINAL`,
+  `xdg-terminal-exec`, then the desktop's own terminal).
 
 ### Search
 
@@ -257,6 +261,7 @@ single-instance behaviour without touching your real session.
 | `src/find_files.rs` | Find in Files: background search and the results buffer |
 | `src/pretty.rs`, `src/pretty/` | Pretty Print: format detection and the per-format formatters |
 | `src/browser.rs` | Embedded webview (wry) and URL handling |
+| `src/system.rs` | Show in File Manager and Open Terminal Here |
 | `src/session.rs` | Hot exit: session format and crash-safe background writer |
 | `src/instance.rs` | Single instance: lock file and local socket |
 | `src/commands.rs` | Commands and key bindings, including chords |

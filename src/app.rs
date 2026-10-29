@@ -14,6 +14,7 @@ use crate::highlight::{comment_token, HlCache, Syntaxes};
 use crate::instance::Primary;
 use crate::search::{Matcher, Search};
 use crate::session::{self, Session, Snapshot, TabState};
+use crate::system;
 use crate::view::{Clip, Results, Tab, ViewState};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, RichText, Sense, TextEdit, Ui,
@@ -647,6 +648,20 @@ impl EdiApp {
                     None => self.set_status("Nothing to open: not an HTML file, and no preview URL set for this project"),
                 }
             }
+            Cmd::ShowInFileManager => match self.tab().and_then(|t| t.buf.path.clone()).or_else(|| self.root.clone()) {
+                Some(p) => match system::show_in_file_manager(&p) {
+                    Ok(()) => self.set_status(format!("Showed {} in the file manager", p.display())),
+                    Err(e) => self.set_status(format!("Unable to open the file manager: {e}")),
+                },
+                None => self.set_status("Nothing to show: the file isn't saved yet"),
+            },
+            Cmd::OpenTerminal => match self.file_dir() {
+                Some(dir) => match system::open_terminal(&dir) {
+                    Ok(()) => self.set_status(format!("Opened a terminal in {}", dir.display())),
+                    Err(e) => self.set_status(format!("Unable to open a terminal: {e}")),
+                },
+                None => self.set_status("No folder: the file isn't saved yet"),
+            },
             Cmd::NewBrowserTab => {
                 let g = self.focus_group;
                 self.add_browser_tab("", g);
@@ -837,6 +852,12 @@ impl EdiApp {
             }
             None => self.set_status("No results"),
         }
+    }
+
+    /// Folder of the active file, else the open folder.
+    fn file_dir(&self) -> Option<PathBuf> {
+        let file = self.tabs.get(self.active).and_then(|t| t.buf.path.as_ref()?.parent().map(Path::to_path_buf));
+        file.or_else(|| self.root.clone())
     }
 
     /// Default "Where" for Find in Files: the open folder, else open files.

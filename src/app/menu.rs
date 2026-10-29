@@ -68,6 +68,9 @@ impl EdiApp {
                 m.item(ui, "Save As…", Cmd::SaveAs);
                 m.item(ui, "Save All", Cmd::SaveAll);
                 ui.separator();
+                m.item(ui, "Show in File Manager", Cmd::ShowInFileManager);
+                m.item(ui, "Open Terminal Here", Cmd::OpenTerminal);
+                ui.separator();
                 m.item(ui, "Close File", Cmd::CloseTab);
                 m.item(ui, "Close All Files", Cmd::CloseAll);
                 ui.separator();

@@ -18,6 +18,8 @@ finish-args:
   - --device=dri
   # A text editor needs to open and save files anywhere.
   - --filesystem=host
+  # Show in File Manager / Open Terminal Here run on the host via flatpak-spawn.
+  - --talk-name=org.freedesktop.Flatpak
 modules:
   - name: edi
     buildsystem: simple

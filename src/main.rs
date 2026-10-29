@@ -13,6 +13,7 @@ mod instance;
 mod pretty;
 mod search;
 mod session;
+mod system;
 mod view;
 
 use std::path::PathBuf;
