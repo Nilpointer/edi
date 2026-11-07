@@ -957,13 +957,14 @@ impl EdiApp {
     fn open_overlay(&mut self, mode: Mode) {
         let query = match &mode {
             Mode::OpenFile | Mode::OpenFolder | Mode::SaveAs => {
-                // A never-saved buffer is saved to the home folder by default.
+                // A never-saved buffer is saved to the open folder, or the
+                // home folder when no folder is open.
                 let untitled = mode == Mode::SaveAs && self.tab().is_some_and(|t| t.buf.path.is_none());
                 let base = self
                     .tab()
                     .and_then(|t| t.buf.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
-                    .or_else(|| if untitled { std::env::home_dir() } else { None })
                     .or_else(|| self.root.clone())
+                    .or_else(|| if untitled { std::env::home_dir() } else { None })
                     .or_else(|| std::env::current_dir().ok())
                     .unwrap_or_else(|| PathBuf::from("/"));
                 let mut s = base.to_string_lossy().into_owned();
