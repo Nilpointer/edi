@@ -10,6 +10,7 @@ repository = "https://github.com/Nilpointer/edi"
 eframe = "0.37.0"
 ignore = "0.4.33"
 interprocess = "2.4.6"
+notify = "8.2.1"
 regex = "1.13.1"
 ropey = "1.6.1"
 serde = { version = "1.0.229", features = ["derive"] }

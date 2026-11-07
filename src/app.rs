@@ -5,7 +5,7 @@ mod groups;
 mod menu;
 mod web;
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Reload};
 use groups::PaneLayout;
 use crate::commands::{Cmd, KeyResult, Keymap, Stroke, COMMANDS};
 use crate::find_files;
@@ -16,6 +16,7 @@ use crate::search::{Matcher, Search};
 use crate::session::{self, Session, Snapshot, TabState};
 use crate::system;
 use crate::view::{Clip, Results, Tab, ViewState};
+use crate::watch::{self, Watch};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, Event, FontId, Key, Layout, Modifiers, RichText, Sense, TextEdit, Ui,
     Vec2, ViewportCommand,
@@ -23,7 +24,7 @@ use eframe::egui::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const EDITOR_ID: &str = "edi-view";
@@ -126,6 +127,10 @@ pub struct EdiApp {
     files: Vec<String>,
     files_rx: Option<mpsc::Receiver<Vec<String>>>,
     dir_cache: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
+    /// Reports changes to the open folder made outside Edi.
+    watch: Option<Watch>,
+    /// When to re-list the folder's files after outside changes.
+    rescan_at: Option<Instant>,
     keymap: Keymap,
     overlay: Option<Overlay>,
     find: FindPanel,
@@ -172,6 +177,8 @@ impl EdiApp {
             files: Vec::new(),
             files_rx: None,
             dir_cache: HashMap::new(),
+            watch: None,
+            rescan_at: None,
             keymap: Keymap::new(),
             overlay: None,
             find: FindPanel::default(),
@@ -209,14 +216,14 @@ impl EdiApp {
         app.primary = primary;
         if use_session {
             if let Some(s) = session::load() {
-                app.apply_session(s);
+                app.apply_session(s, &cc.egui_ctx);
             }
             app.session = Some(session::Writer::new());
         }
         for a in args {
             let a = a.canonicalize().unwrap_or(a);
             if a.is_dir() {
-                app.set_root(a);
+                app.set_root(a, &cc.egui_ctx);
             } else {
                 app.open(&a);
             }
@@ -238,7 +245,7 @@ impl EdiApp {
         for path in requests.into_iter().flat_map(|r| r.paths) {
             let path = path.canonicalize().unwrap_or(path);
             if path.is_dir() {
-                self.set_root(path);
+                self.set_root(path, ctx);
             } else {
                 self.open(&path);
             }
@@ -247,7 +254,7 @@ impl EdiApp {
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
-    fn apply_session(&mut self, s: Session) {
+    fn apply_session(&mut self, s: Session, ctx: &egui::Context) {
         self.font_size = s.font_size.clamp(7.0, 48.0);
         self.show_sidebar = s.sidebar;
         self.show_minimap = s.minimap;
@@ -259,7 +266,7 @@ impl EdiApp {
             self.syn.theme = i;
         }
         if let Some(root) = s.root.filter(|r| r.is_dir()) {
-            self.set_root(root);
+            self.set_root(root, ctx);
         }
         self.layout = PaneLayout::from_code(s.layout);
         self.preview_urls = s.preview_urls;
@@ -407,11 +414,29 @@ impl EdiApp {
         self.status = Some((s.into(), Instant::now()));
     }
 
-    fn set_root(&mut self, root: PathBuf) {
+    fn set_root(&mut self, root: PathBuf, ctx: &egui::Context) {
+        // Canonical, like tab paths, so watcher events match open files.
+        let root = root.canonicalize().unwrap_or(root);
         self.dir_cache.clear();
         self.files.clear();
+        self.rescan_at = None;
+        self.watch = match Watch::new(&root, ctx.clone()) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                self.set_status(format!("Not watching {} for changes: {e}", root.display()));
+                None
+            }
+        };
+        self.root = Some(root);
+        self.scan_files();
+        self.show_sidebar = true;
+    }
+
+    /// List the open folder's files for Goto Anything, in the background.
+    fn scan_files(&mut self) {
+        let Some(root) = self.root.clone() else { return };
         let (tx, rx) = mpsc::channel();
-        let r = root.clone();
+        let r = root;
         std::thread::spawn(move || {
             let mut out = Vec::new();
             for entry in ignore::WalkBuilder::new(&r).hidden(true).build().flatten() {
@@ -428,8 +453,55 @@ impl EdiApp {
             let _ = tx.send(out);
         });
         self.files_rx = Some(rx);
-        self.root = Some(root);
-        self.show_sidebar = true;
+    }
+
+    /// Apply changes made outside Edi: refresh the sidebar and file list,
+    /// reload open files, and keep unsaved edits when their file changed.
+    fn poll_watch(&mut self, ctx: &egui::Context) {
+        let Some(w) = &mut self.watch else { return };
+        let c = w.poll();
+        if c.rescan {
+            self.dir_cache.clear();
+        }
+        for p in &c.moved {
+            if let Some(parent) = p.parent() {
+                self.dir_cache.remove(parent);
+            }
+            self.dir_cache.retain(|k, _| !k.starts_with(p));
+        }
+        if c.incomplete {
+            self.set_status("Some folders are not watched for outside changes (too many folders)");
+        }
+        if (c.rescan || !c.moved.is_empty()) && self.rescan_at.is_none() {
+            // Let a burst (git checkout, npm install) settle, but not forever.
+            self.rescan_at = Some(Instant::now() + Duration::from_millis(300));
+        }
+        if let Some(at) = self.rescan_at {
+            let now = Instant::now();
+            if now < at {
+                ctx.request_repaint_after(at - now);
+            } else if self.files_rx.is_none() {
+                // A scan still running finishes first; this one follows it.
+                self.rescan_at = None;
+                self.scan_files();
+            }
+        }
+
+        let mut notes = Vec::new();
+        for t in &mut self.tabs {
+            let Some(path) = &t.buf.path else { continue };
+            if !(c.rescan || c.touched.contains(path)) || !path.is_file() {
+                continue;
+            }
+            match t.buf.reload() {
+                Ok(Reload::Reloaded) => notes.push(format!("Reloaded {}", t.buf.name())),
+                Ok(Reload::Kept) => notes.push(format!("{} changed on disk; your unsaved edits were kept", t.buf.name())),
+                Ok(Reload::Unchanged) | Err(_) => {}
+            }
+        }
+        if !notes.is_empty() {
+            self.set_status(notes.join(" · "));
+        }
     }
 
     fn new_tab(&mut self, buf: Buffer) {
@@ -1092,7 +1164,7 @@ impl EdiApp {
             Action::Path(p, is_dir) => match mode {
                 Some(Mode::OpenFolder) if !is_dir || p.is_dir() && self.overlay.as_ref().is_some_and(|o| o.selected == 0) => {
                     self.close_overlay(true);
-                    self.set_root(p);
+                    self.set_root(p, ctx);
                 }
                 Some(_) if is_dir => {
                     if let Some(o) = &mut self.overlay {
@@ -1103,6 +1175,11 @@ impl EdiApp {
                 Some(Mode::SaveAs) => {
                     self.close_overlay(true);
                     let i = self.active;
+                    // Canonical, like opened files, so outside changes match it.
+                    let p = match (p.parent().and_then(|d| d.canonicalize().ok()), p.file_name()) {
+                        (Some(dir), Some(name)) => dir.join(name),
+                        _ => p,
+                    };
                     if let Some(t) = self.tabs.get_mut(i) {
                         t.buf.path = Some(p);
                     }
@@ -1318,7 +1395,7 @@ impl EdiApp {
                 let mut v: Vec<(PathBuf, bool)> = std::fs::read_dir(dir)
                     .map(|rd| {
                         rd.flatten()
-                            .filter(|e| !matches!(e.file_name().to_str(), Some(".git" | ".DS_Store" | "target" | "node_modules")))
+                            .filter(|e| !e.file_name().to_str().is_some_and(watch::skipped))
                             .map(|e| (e.path(), e.path().is_dir()))
                             .collect()
                     })
@@ -1810,6 +1887,7 @@ impl eframe::App for EdiApp {
 
         self.take_forwarded(&ctx);
         self.poll_find_in_files(&ctx);
+        self.poll_watch(&ctx);
         if let Some(rx) = &self.files_rx {
             if let Ok(files) = rx.try_recv() {
                 self.files = files;
@@ -1825,7 +1903,7 @@ impl eframe::App for EdiApp {
         // Dropped files open in tabs; dropped folders become the project.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for p in dropped {
-            if p.is_dir() { self.set_root(p) } else { self.open(&p) }
+            if p.is_dir() { self.set_root(p, &ctx) } else { self.open(&p) }
         }
 
         if ctx.input(|i| i.viewport().close_requested())

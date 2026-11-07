@@ -76,6 +76,17 @@ pub struct Buffer {
     encoding: Encoding,
 }
 
+/// Outcome of [`Buffer::reload`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reload {
+    /// The file matches what was last loaded or saved.
+    Unchanged,
+    /// The buffer now shows the new file contents.
+    Reloaded,
+    /// The file changed but the buffer's unsaved edits were kept.
+    Kept,
+}
+
 /// On-disk text encodings we can read and write back faithfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Encoding {
@@ -232,6 +243,36 @@ impl Buffer {
         self.saved_rope = self.rope.clone();
         self.dirty_memo.set((self.version, false));
         Ok(())
+    }
+
+    /// Pick up a change made to the file outside Edi. A buffer without
+    /// unsaved edits takes the new text, keeping the old one on the undo
+    /// stack and carets at their line and column. A buffer with unsaved
+    /// edits keeps them; it now counts as modified against the new file.
+    pub fn reload(&mut self) -> std::io::Result<Reload> {
+        let path = self.path.clone().ok_or_else(|| std::io::Error::other("no path"))?;
+        let (text, encoding) = decode(std::fs::read(&path)?)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "binary file"))?;
+        let rope = Rope::from_str(&text.replace("\r\n", "\n"));
+        if rope == self.saved_rope {
+            return Ok(Reload::Unchanged);
+        }
+        let dirty = self.is_dirty();
+        self.encoding = encoding;
+        self.saved_rope = rope.clone();
+        self.dirty_memo.set((u64::MAX, false));
+        if dirty {
+            return Ok(Reload::Kept);
+        }
+        let carets: Vec<_> = self.sels.iter().map(|s| (self.pos_to_lc(s.anchor), self.pos_to_lc(s.head))).collect();
+        self.checkpoint(EditKind::Other);
+        self.last_edit = None;
+        self.rope = rope;
+        self.sels = carets.into_iter().map(|((al, ac), (hl, hc))| Sel::new(self.lc_to_pos(al, ac), self.lc_to_pos(hl, hc))).collect();
+        self.clear_folds();
+        self.mark_changed(0);
+        self.normalize();
+        Ok(Reload::Reloaded)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1743,6 +1784,34 @@ mod restore_tests {
         std::fs::remove_file(&p).unwrap();
         assert!(Buffer::from_session(Some(&p), None, &[]).is_err());
         assert!(Buffer::from_session(None, Some(""), &[]).is_err());
+    }
+
+    #[test]
+    fn reload_picks_up_outside_changes() {
+        let p = std::env::temp_dir().join(format!("edi-reload-{}.txt", std::process::id()));
+        std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
+        let mut b = Buffer::open(&p).unwrap();
+        b.sels = vec![Sel::caret(b.lc_to_pos(2, 3))];
+        assert_eq!(b.reload().unwrap(), Reload::Unchanged);
+
+        // A clean buffer takes the new text; the caret keeps line and column.
+        std::fs::write(&p, "one\r\ntwo\r\nthree!\r\nfour\r\n").unwrap();
+        assert_eq!(b.reload().unwrap(), Reload::Reloaded);
+        assert_eq!(b.rope.to_string(), "one\ntwo\nthree!\nfour\n");
+        assert!(!b.is_dirty());
+        assert_eq!(b.pos_to_lc(b.sels[0].head), (2, 3));
+        b.undo();
+        assert_eq!(b.rope.to_string(), "one\ntwo\nthree\n");
+        b.redo();
+
+        // Unsaved edits are kept, and now differ from the file.
+        b.insert("x");
+        std::fs::write(&p, "other\n").unwrap();
+        assert_eq!(b.reload().unwrap(), Reload::Kept);
+        assert!(b.rope.to_string().contains('x'));
+        assert!(b.is_dirty());
+        assert_eq!(b.reload().unwrap(), Reload::Unchanged);
+        std::fs::remove_file(&p).unwrap();
     }
 }
 

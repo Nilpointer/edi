@@ -15,6 +15,7 @@ mod search;
 mod session;
 mod system;
 mod view;
+mod watch;
 
 use std::path::PathBuf;
 
