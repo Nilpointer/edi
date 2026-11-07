@@ -974,7 +974,7 @@ impl EdiApp {
                     if let Some(t) = self.tab() {
                         match &t.buf.path {
                             Some(p) => s.push_str(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                            None => s.push_str(&format!("{}.txt", suggested_stem(&t.buf))),
+                            None => s.push_str(&free_name(&base)),
                         }
                     }
                 }
@@ -1838,12 +1838,13 @@ fn screenshot_frame() -> u64 {
     40.max(10 + pointer_steps().len() as u64 * 8 + 20)
 }
 
-/// File name stem for saving an untitled buffer: its tab name, minus
-/// characters that aren't allowed in file names.
-fn suggested_stem(buf: &Buffer) -> String {
-    let s: String = buf.name().chars().filter(|c| !c.is_control() && !r#"/\:*?"<>|"#.contains(*c)).collect();
-    let s = s.trim().trim_end_matches('.').trim();
-    if s.is_empty() { "untitled".into() } else { s.into() }
+/// Generic file name for saving an untitled buffer: the first of
+/// `file.txt`, `file1.txt`, `file2.txt`, ... that doesn't exist in `dir`.
+fn free_name(dir: &Path) -> String {
+    (0..)
+        .map(|i| if i == 0 { "file.txt".to_string() } else { format!("file{i}.txt") })
+        .find(|n| !dir.join(n).exists())
+        .unwrap()
 }
 
 fn expand_home(s: &str) -> PathBuf {
